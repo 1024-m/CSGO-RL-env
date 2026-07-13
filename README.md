@@ -14,11 +14,11 @@ bash start.sh
  - GTA components for health, stats, utils, current weapon, ammo, ping
  
  # **Tasks (Features)**
-- Weapon reload logic
-- Weapon ammo logic
-- Weapon recoil logic
 - Accurate useful FOV logic
+- Weapons firing audio
+- Game timer and end logic
 
  # **Tasks (AI/ML)**
  - RL data collector utils
  - Baseline reward policy
+ - Game/payer stats collection

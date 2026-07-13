@@ -257,6 +257,7 @@ export class WeaponSystem {
     this.gunLoading = false;
     this.reloading = null;
     this.reloadTimer = 0;
+    this._cameraPos = null;
 
     this.ammo = {
       gun: { mag: AMMO_CONFIG.gun.magSize, reserve: AMMO_CONFIG.gun.reserve },
@@ -292,6 +293,7 @@ export class WeaponSystem {
     this._forward = new THREE.Vector3();
     this._muzzleWorld = new THREE.Vector3();
     this._aimEnd = new THREE.Vector3();
+    this._traceDir = new THREE.Vector3();
     this._onWheel = this._onWheel.bind(this);
     this._onDown = this._onDown.bind(this);
     this._onUp = this._onUp.bind(this);
@@ -398,8 +400,10 @@ export class WeaponSystem {
     if (this.onAmmoChange) this.onAmmoChange(this.getAmmoDisplay());
   }
 
-  _setAimFromPlayer(player) {
-    if (player) {
+  _setAimDirection(aimDir, player) {
+    if (aimDir) {
+      this._forward.copy(aimDir);
+    } else if (player) {
       player.getAimDirection(this._forward);
     } else {
       const yaw = this.character.rotation.y;
@@ -517,7 +521,7 @@ export class WeaponSystem {
     if (event.button !== 0 || !this._pointerLocked()) return;
     this.lmbHeld = true;
     if (this.currentId === 'melee') this._startSwing();
-    if (this.currentId === 'gun') this._fireGun(this._playerRef);
+    if (this.currentId === 'gun') this._fireGun(this._playerRef, this._cameraPos);
   }
 
   _onUp(event) {
@@ -543,7 +547,7 @@ export class WeaponSystem {
     player.applyRecoil(yawKick, pitchKick);
   }
 
-  _fireGun(player) {
+  _fireGun(player, cameraPos) {
     if (!this.gunLoaded) {
       this._loadGunModel();
       return;
@@ -560,11 +564,18 @@ export class WeaponSystem {
     this._applyGunRecoil(player);
     if (!this._consumeGunRound()) return;
 
-    this._setAimFromPlayer(player);
+    this._setAimDirection(null, player);
 
     const muzzle = this.gunMuzzle || this.root;
     muzzle.getWorldPosition(this._muzzleWorld);
-    this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, 22);
+
+    if (cameraPos) {
+      this._traceDir.copy(cameraPos).addScaledVector(this._forward, 40);
+      this._traceDir.sub(this._muzzleWorld).normalize();
+      this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._traceDir, 14);
+    } else {
+      this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, 14);
+    }
 
     const geo = new THREE.CylinderGeometry(0.01, 0.01, 1, 5);
     geo.rotateX(Math.PI / 2);
@@ -577,7 +588,7 @@ export class WeaponSystem {
     this.tracers.push({ mesh, life: 0.06 });
   }
 
-  update(delta, player) {
+  update(delta, player, aimDir, cameraPos) {
     if (!this.ready) return;
     this._playerRef = player || null;
 
@@ -589,7 +600,8 @@ export class WeaponSystem {
     this.gunCooldown = Math.max(0, this.gunCooldown - delta);
     this.muzzleFlashT = Math.max(0, this.muzzleFlashT - delta);
 
-    this._setAimFromPlayer(player);
+    this._setAimDirection(aimDir, player);
+    this._cameraPos = cameraPos || null;
 
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const tr = this.tracers[i];
@@ -602,7 +614,7 @@ export class WeaponSystem {
     }
 
     if (this.currentId === 'gun' && this.lmbHeld && this._pointerLocked() && !this.reloading) {
-      this._fireGun(player);
+      this._fireGun(player, cameraPos);
     }
 
     if (this.currentId === 'flamethrower') {

@@ -18,6 +18,7 @@ const panelClose = document.getElementById('panel-close');
 const footerText = document.getElementById('footer-text');
 const weaponHud = document.getElementById('weapon-hud');
 const ammoHud = document.getElementById('ammo-hud');
+const crosshair = document.getElementById('crosshair');
 
 function setStatus(text) {
   if (footerText) footerText.textContent = text;
@@ -41,7 +42,10 @@ const CONTROLS_LINE =
 
 const CHARACTER_MODEL_YAW = -Math.PI / 2;
 const CHARACTER_WIDTH_SCALE = 0.93;
-const CAMERA_DISTANCE = 1.68;
+const CAMERA_DISTANCE = 1.58;
+const CAMERA_SHOULDER_Y = 1.05;
+const CAMERA_LIFT = 0.2;
+const AIM_LOOK_DISTANCE = 40;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -83,8 +87,11 @@ const minimap = new Minimap(minimapWrap, minimapCanvas);
 const character = new THREE.Group();
 scene.add(character);
 
-const cameraOffset = new THREE.Vector3();
 const cameraPivot = new THREE.Vector3();
+const cameraAimDir = new THREE.Vector3();
+const cameraLookTarget = new THREE.Vector3();
+const cameraHorizBack = new THREE.Vector3();
+const worldAimDir = new THREE.Vector3();
 
 let mapRoot = new THREE.Group();
 let collisionWorld = null;
@@ -196,6 +203,7 @@ mapLoader.load(
 
       mapLoaded = true;
       initWeapons();
+      setCrosshairVisible(true);
       setStatus(CONTROLS_LINE);
     } catch (err) {
       console.error(err);
@@ -217,25 +225,41 @@ mapLoader.load(
 );
 
 function updateThirdPersonCamera(feet, cameraYaw, pitch) {
-  cameraPivot.set(feet.x, feet.y + 1.05, feet.z);
+  const cosPitch = Math.cos(pitch);
+  cameraAimDir.set(
+    Math.sin(cameraYaw) * cosPitch,
+    Math.sin(pitch),
+    Math.cos(cameraYaw) * cosPitch,
+  );
 
-  cameraOffset.set(0, 0, -CAMERA_DISTANCE);
-  cameraOffset.applyAxisAngle(new THREE.Vector3(1, 0, 0), -pitch);
-  cameraOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
+  cameraPivot.set(feet.x, feet.y + CAMERA_SHOULDER_Y, feet.z);
 
-  camera.position.copy(cameraPivot).add(cameraOffset);
-  camera.lookAt(cameraPivot);
+  cameraHorizBack.set(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
+
+  camera.position
+    .copy(cameraPivot)
+    .addScaledVector(cameraHorizBack, CAMERA_DISTANCE);
+  camera.position.y += CAMERA_LIFT;
+
+  cameraLookTarget.copy(camera.position).addScaledVector(cameraAimDir, AIM_LOOK_DISTANCE);
+  camera.lookAt(cameraLookTarget);
+}
+
+function setCrosshairVisible(visible) {
+  if (crosshair) crosshair.hidden = !visible;
 }
 
 function showPanel(item) {
   panelTitle.textContent = item.data.title;
   panelBody.textContent = item.data.body;
   panel.hidden = false;
+  setCrosshairVisible(false);
   document.exitPointerLock();
 }
 
 function hidePanel() {
   panel.hidden = true;
+  if (mapLoaded) setCrosshairVisible(true);
 }
 
 renderer.domElement.addEventListener('click', () => {
@@ -278,11 +302,12 @@ function animate() {
     character.rotation.y = player.characterYaw;
     character.visible = characterReady;
 
-    if (weapons) {
-      weapons.update(delta, player);
-    }
-
     updateThirdPersonCamera(feet, player.cameraYaw, player.cameraPitch);
+    camera.getWorldDirection(worldAimDir);
+
+    if (weapons) {
+      weapons.update(delta, player, worldAimDir, camera.position);
+    }
 
     const mouseLookActive = player.pointerLocked && !player.isMouseIdle();
     minimap.draw(feet.x, feet.z, player.cameraYaw, player.characterYaw, mouseLookActive);
