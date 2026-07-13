@@ -18,6 +18,9 @@ const GUN_RECOIL_MOVING_DEG = 6;
 const GUN_RECOIL_SCOPED_DEG = 4; // between stationary and moving (placeholder)
 const GUN_RECOIL_STILL_DEG = 3;
 const FLAME_USE_PER_SEC = 30;
+/** Fire from the view center ray (matches crosshair), not the side-held weapon model. */
+const FIRE_ORIGIN_AHEAD = 0.85;
+const GUN_TRACER_LENGTH = 16;
 
 const AMMO_CONFIG = {
   gun: { magSize: 80, reserve: 1000, reloadTime: 2 },
@@ -429,6 +432,17 @@ export class WeaponSystem {
     }
   }
 
+  /** Origin on the screen-center aim ray, just ahead of the camera. */
+  _getCenterFireOrigin(cameraPos, target = this._muzzleWorld) {
+    if (cameraPos) {
+      return target.copy(cameraPos).addScaledVector(this._forward, FIRE_ORIGIN_AHEAD);
+    }
+    // Fallback: in front of the character torso
+    target.copy(this.character.position);
+    target.y += 1.05;
+    return target.addScaledVector(this._forward, FIRE_ORIGIN_AHEAD);
+  }
+
   _canUseAmmo(weaponId) {
     const cfg = AMMO_CONFIG[weaponId];
     if (cfg?.infinite) return true;
@@ -589,17 +603,9 @@ export class WeaponSystem {
     if (!this._consumeGunRound()) return;
 
     this._setAimDirection(null, player);
-
-    const muzzle = this.gunMuzzle || this.root;
-    muzzle.getWorldPosition(this._muzzleWorld);
-
-    if (cameraPos) {
-      this._traceDir.copy(cameraPos).addScaledVector(this._forward, 40);
-      this._traceDir.sub(this._muzzleWorld).normalize();
-      this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._traceDir, 14);
-    } else {
-      this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, 14);
-    }
+    // Keep shots on the crosshair ray (center), not the side-held gun model.
+    this._getCenterFireOrigin(cameraPos || this._cameraPos, this._muzzleWorld);
+    this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, GUN_TRACER_LENGTH);
 
     const geo = new THREE.CylinderGeometry(0.01, 0.01, 1, 5);
     geo.rotateX(Math.PI / 2);
@@ -650,8 +656,7 @@ export class WeaponSystem {
       if (firing) this._consumeFlame(delta);
 
       this.flame.setFiring(firing);
-      const nozzle = this.flameNozzle || this.root;
-      nozzle.getWorldPosition(this._muzzleWorld);
+      this._getCenterFireOrigin(cameraPos || this._cameraPos, this._muzzleWorld);
       this.flame.update(delta, this._muzzleWorld, this._forward);
       this.muzzleLight.position.set(0.2, 0.05, 0);
       this.muzzleLight.intensity = firing ? 2.2 + Math.random() : 0;
