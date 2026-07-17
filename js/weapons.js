@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { WeaponAudio } from './weapon-audio.js?v=6';
+import { WeaponAudio } from './weapon-audio.js?v=12';
 import { ImpactSystem } from './impacts.js?v=5';
 
 const WEAPON_IDS = ['machinegun', 'sniper', 'flamethrower', 'grenade', 'melee'];
@@ -757,8 +757,8 @@ export class WeaponSystem {
       .normalize();
   }
 
-  _spawnTracer(from, to, life = 0.06) {
-    const geo = new THREE.CylinderGeometry(0.01, 0.01, 1, 5);
+  _spawnTracer(from, to, life = 0.06, radius = 0.01) {
+    const geo = new THREE.CylinderGeometry(radius, radius * 0.65, 1, 6);
     geo.rotateX(Math.PI / 2);
     const mesh = new THREE.Mesh(geo, this._tracerMat);
     const mid = from.clone().lerp(to, 0.5);
@@ -825,8 +825,26 @@ export class WeaponSystem {
       FIRE_AIM_POINT_DIST,
     );
     if (hitPoint) this._aimEnd.copy(hitPoint);
-    else this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, TRACER_LENGTH);
-    this._spawnTracer(this._muzzleWorld, this._aimEnd, weaponId === 'sniper' ? 0.1 : 0.06);
+    else this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, FIRE_AIM_POINT_DIST);
+
+    // Scoped-still tracer is coaxial with the camera → invisible. Offset the
+    // *visual* streak slightly in view-space; hitscan stays on the true ray.
+    let tracerFrom = this._muzzleWorld;
+    let tracerLife = weaponId === 'sniper' ? 0.14 : 0.06;
+    let tracerRadius = weaponId === 'sniper' ? 0.028 : 0.01;
+    if (sniperScoped) {
+      this._viewRight.crossVectors(this._forward, this._worldUp);
+      if (this._viewRight.lengthSq() < 1e-8) this._viewRight.set(1, 0, 0);
+      else this._viewRight.normalize();
+      this._viewLeft.crossVectors(this._viewRight, this._forward).normalize(); // view up
+      tracerFrom = this._muzzleWorld.clone()
+        .addScaledVector(this._forward, 0.85)
+        .addScaledVector(this._viewLeft, -0.045)
+        .addScaledVector(this._viewRight, 0.02);
+      tracerLife = 0.16;
+      tracerRadius = 0.035;
+    }
+    this._spawnTracer(tracerFrom, this._aimEnd, tracerLife, tracerRadius);
 
     if (this.net?.inMatch) {
       this.net.tryHitscan(weaponId, this._muzzleWorld, this._forward);

@@ -17,20 +17,63 @@ function createMachinegunShotBuffer(ctx) {
   return buffer;
 }
 
+/** Heavy bolt-rifle report — not a slowed MG. Crack + sub boom + brass ring. */
 function createSniperShotBuffer(ctx) {
   const rate = ctx.sampleRate;
-  const length = Math.floor(0.35 * rate);
+  const length = Math.floor(0.95 * rate);
   const buffer = ctx.createBuffer(1, length, rate);
   const data = buffer.getChannelData(0);
-  let low = 0;
+  let brown = 0;
+  let prev = 0;
+  let ringLp = 0;
+
   for (let i = 0; i < length; i += 1) {
     const t = i / rate;
-    const env = Math.exp(-t * 10);
-    const crack = Math.exp(-t * 60) * (Math.random() * 2 - 1);
-    low = low * 0.96 + (Math.random() * 2 - 1) * 0.04;
-    const boom = Math.sin(2 * Math.PI * (55 + t * 20) * t) * Math.exp(-t * 8);
-    data[i] = (crack * 0.45 + low * 0.85 + boom * 0.7) * env;
+    const white = Math.random() * 2 - 1;
+    const hp = white - prev;
+    prev = white;
+
+    brown += white * 0.028;
+    brown *= 0.993;
+    brown = Math.max(-1.2, Math.min(1.2, brown));
+
+    // Supersonic / muzzle crack (harsh HF, very short)
+    const crackEnv = Math.exp(-t * 95);
+    const crack = (white * 1.4 + hp * 2.2) * crackEnv;
+
+    // Chest-thump pressure (sub + low mid, noise-shaped — not a soft sine)
+    const thumpEnv = Math.exp(-t * 5.5) * (t < 0.004 ? t / 0.004 : 1);
+    const thump = brown * thumpEnv * 3.4
+      + Math.sin(2 * Math.PI * 48 * t) * thumpEnv * 0.55
+      + Math.sin(2 * Math.PI * 72 * t) * Math.exp(-t * 14) * 0.35;
+
+    // Metallic bolt / chamber ring (distinct from MG body)
+    const ringEnv = Math.exp(-t * 7) * (1 - Math.exp(-t * 80));
+    ringLp = ringLp * 0.88 + white * 0.12;
+    const ring =
+      Math.sin(2 * Math.PI * 2100 * t) * ringEnv * 0.22
+      + Math.sin(2 * Math.PI * 3150 * t) * ringEnv * 0.12
+      + ringLp * ringEnv * 0.18;
+
+    // Outdoor slap / short echo tail
+    const slapEnv = Math.exp(-t * 3.2) * (t > 0.04 ? 1 : t / 0.04);
+    const slap = brown * slapEnv * 0.55 + white * Math.exp(-t * 18) * 0.15;
+
+    let s = crack * 1.15 + thump + ring + slap;
+    s = Math.tanh(s * 0.85);
+    data[i] = s;
   }
+
+  // Light delayed slap (different character than MG one-shot)
+  const delay = Math.floor(0.055 * rate);
+  for (let i = delay; i < length; i += 1) {
+    data[i] += data[i - delay] * 0.28;
+  }
+
+  let peak = 1e-6;
+  for (let i = 0; i < length; i += 1) peak = Math.max(peak, Math.abs(data[i]));
+  const norm = 0.98 / peak;
+  for (let i = 0; i < length; i += 1) data[i] *= norm;
   return buffer;
 }
 
@@ -229,8 +272,9 @@ export class WeaponAudio {
   playSniperShot() {
     if (!this.ready) return;
     this._resumeIfNeeded();
-    const rate = 0.94 + Math.random() * 0.1;
-    this._playBuffer(this.buffers.sniper, { volume: 1.0, playbackRate: rate });
+    // Louder / heavier than MG — slight rate jitter only, keep body intact
+    const rate = 0.97 + Math.random() * 0.04;
+    this._playBuffer(this.buffers.sniper, { volume: 1.45, playbackRate: rate });
   }
 
   playExplosion() {
