@@ -359,13 +359,14 @@ export class NetClient {
     });
   }
 
-  notifyGrenadeThrow(origin, vel, fuse) {
+  notifyGrenadeThrow(origin, vel, fuse, kind = 'he') {
     if (!this.inMatch) return;
     this.send({
       type: 'grenade_throw',
       origin: [origin.x, origin.y, origin.z],
       vel: [vel.x, vel.y, vel.z],
       fuse,
+      kind,
     });
   }
 

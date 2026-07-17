@@ -1,14 +1,17 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { WeaponAudio } from './weapon-audio.js?v=12';
+import { WeaponAudio } from './weapon-audio.js?v=13';
 import { ImpactSystem } from './impacts.js?v=5';
+import { SMOKE_RADIUS } from './combat.js';
 
-const WEAPON_IDS = ['machinegun', 'sniper', 'flamethrower', 'grenade', 'melee'];
+const WEAPON_IDS = ['machinegun', 'shotgun', 'sniper', 'flamethrower', 'grenade', 'smoke', 'melee'];
 const WEAPON_LABELS = {
   machinegun: 'PU-21',
+  shotgun: 'Combat Shotgun',
   sniper: 'Bolt Rifle',
   flamethrower: 'Flamethrower',
   grenade: 'Stick Grenade',
+  smoke: 'Smoke Canister',
   melee: 'Pipe Wrench',
 };
 
@@ -19,21 +22,33 @@ const FLAME_PARTICLES = 220;
 
 const MACHINEGUN_FIRE_INTERVAL = 1 / 8;
 const SNIPER_FIRE_INTERVAL = 2;
+const SHOTGUN_FIRE_INTERVAL = SNIPER_FIRE_INTERVAL / 2;
 const GRENADE_THROW_INTERVAL = 2;
 const GRENADE_FUSE = 2.5;
 const GRENADE_THROW_SPEED = 14;
 const GRENADE_GRAVITY = 18;
 
 const MACHINEGUN_RECOIL_MOVING_DEG = 6;
-const MACHINEGUN_RECOIL_SCOPED_DEG = 4;
+/** Scoped MG: FOV-true shots, but harder kick for balance. */
+const MACHINEGUN_RECOIL_SCOPED_DEG = 8.5;
 const MACHINEGUN_RECOIL_STILL_DEG = 3;
 /** Scoped sniper: perfect when still; ≤2° cone while moving. */
 const SNIPER_SCOPED_STILL_DEG = 0;
 const SNIPER_SCOPED_MOVING_DEG = 2;
+const SHOTGUN_PELLETS_MIN = 8;
+const SHOTGUN_PELLETS_MAX = 12;
+const SHOTGUN_SPREAD_DEG = 11;
+const SHOTGUN_RECOIL_MOVING_DEG = 10;
+const SHOTGUN_RECOIL_STILL_DEG = 7;
 /** Hip FOV / scope FOV ≈ zoom. Sniper zoom = 2.5× machinegun zoom. */
 const MACHINEGUN_SCOPE_FOV = 48;
 const SNIPER_SCOPE_FOV = MACHINEGUN_SCOPE_FOV / 2.5;
 const FLAME_USE_PER_SEC = 30;
+/** Smoke: expand 1s → hold 8s → shrink 1s. */
+const SMOKE_EXPAND_SEC = 1;
+const SMOKE_HOLD_SEC = 8;
+const SMOKE_SHRINK_SEC = 1;
+const SMOKE_TOTAL_SEC = SMOKE_EXPAND_SEC + SMOKE_HOLD_SEC + SMOKE_SHRINK_SEC;
 /** View-left shoulder origin (screen-left), fire toward crosshair aim point. */
 const FIRE_SHOULDER_Y = 1.18;
 const FIRE_SHOULDER_FORWARD = 0.28;
@@ -43,20 +58,63 @@ const TRACER_LENGTH = 16;
 
 const AMMO_CONFIG = {
   machinegun: { magSize: 80, reserve: 1000, reloadTime: 2 },
+  shotgun: { magSize: 8, reserve: 40, reloadTime: 2.8 },
   sniper: { magSize: 5, reserve: 40, reloadTime: 2.5 },
   flamethrower: { magSize: 200, reserve: 2500, reloadTime: 4 },
   grenade: { magSize: 3, reserve: 12, reloadTime: 1.5 },
+  smoke: { magSize: 2, reserve: 8, reloadTime: 1.5 },
   melee: { infinite: true },
 };
 
 /** Per-weapon capability flags. */
 const WEAPON_FLAGS = {
   machinegun: { canScope: true, requireScopeToFire: false },
+  shotgun: { canScope: false, requireScopeToFire: false },
   sniper: { canScope: true, requireScopeToFire: true },
   flamethrower: { canScope: false, requireScopeToFire: false },
   grenade: { canScope: false, requireScopeToFire: false },
+  smoke: { canScope: false, requireScopeToFire: false },
   melee: { canScope: false, requireScopeToFire: false },
 };
+
+function createShotgunProp() {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, metalness: 0.55, roughness: 0.4 });
+  const wood = new THREE.MeshStandardMaterial({ color: 0x5a3a22, metalness: 0.1, roughness: 0.7 });
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.72, 10), dark);
+  barrel.rotation.z = Math.PI / 2;
+  barrel.position.set(0.2, 0.04, 0);
+  const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.08, 0.06), dark);
+  receiver.position.set(0.02, 0.03, 0);
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.07, 0.05), wood);
+  stock.position.set(-0.2, 0.0, 0);
+  stock.rotation.z = 0.15;
+  const pump = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.05, 0.05), wood);
+  pump.position.set(0.12, -0.02, 0);
+  g.add(barrel, receiver, stock, pump);
+  return g;
+}
+
+function createSmokeCanisterProp() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.038, 0.16, 12),
+    new THREE.MeshStandardMaterial({ color: 0x6a7a88, metalness: 0.4, roughness: 0.45 }),
+  );
+  const cap = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.03, 0.03, 0.03, 10),
+    new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.6, roughness: 0.35 }),
+  );
+  cap.position.y = 0.095;
+  const pin = new THREE.Mesh(
+    new THREE.TorusGeometry(0.02, 0.004, 6, 12),
+    new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.8, roughness: 0.3 }),
+  );
+  pin.position.set(0.02, 0.11, 0);
+  pin.rotation.y = Math.PI / 2;
+  g.add(body, cap, pin);
+  return g;
+}
 
 const INFINITY = '∞';
 
@@ -296,20 +354,26 @@ export class WeaponSystem {
     this.sniperLoading = false;
     this.grenadeLoaded = false;
     this.grenadeLoading = false;
+    this.shotgunLoaded = false;
+    this.smokeLoaded = false;
     this.reloading = null;
     this.reloadTimer = 0;
     this._cameraPos = null;
     this._aimDirRef = null;
     this.scoping = false;
     this.liveGrenades = [];
+    this.liveSmokes = [];
     this._grenadeVel = new THREE.Vector3();
     this._grenadeNext = new THREE.Vector3();
+    this._pelletDir = new THREE.Vector3();
 
     this.ammo = {
       machinegun: { mag: AMMO_CONFIG.machinegun.magSize, reserve: AMMO_CONFIG.machinegun.reserve },
+      shotgun: { mag: AMMO_CONFIG.shotgun.magSize, reserve: AMMO_CONFIG.shotgun.reserve },
       sniper: { mag: AMMO_CONFIG.sniper.magSize, reserve: AMMO_CONFIG.sniper.reserve },
       flamethrower: { mag: AMMO_CONFIG.flamethrower.magSize, reserve: AMMO_CONFIG.flamethrower.reserve },
       grenade: { mag: AMMO_CONFIG.grenade.magSize, reserve: AMMO_CONFIG.grenade.reserve },
+      smoke: { mag: AMMO_CONFIG.smoke.magSize, reserve: AMMO_CONFIG.smoke.reserve },
     };
 
     this.root = new THREE.Group();
@@ -318,9 +382,11 @@ export class WeaponSystem {
 
     this.slots = {
       machinegun: new THREE.Group(),
+      shotgun: new THREE.Group(),
       sniper: new THREE.Group(),
       flamethrower: new THREE.Group(),
       grenade: new THREE.Group(),
+      smoke: new THREE.Group(),
       melee: new THREE.Group(),
     };
     for (const id of WEAPON_IDS) {
@@ -418,6 +484,26 @@ export class WeaponSystem {
       this.grenadeLoaded = true;
       done();
     }, undefined, done);
+
+    // Procedural props (no glb)
+    const shotgun = createShotgunProp();
+    fitWeaponModel(shotgun, 0.85);
+    shotgun.rotation.set(0.08, Math.PI / 2, 0);
+    shotgun.position.set(0.08, 0.02, 0);
+    this.slots.shotgun.add(shotgun);
+    const sgMuzzle = new THREE.Object3D();
+    sgMuzzle.position.set(0.5, 0.05, 0);
+    this.slots.shotgun.add(sgMuzzle);
+    this.shotgunMuzzle = sgMuzzle;
+    this.shotgunLoaded = true;
+
+    const smokeProp = createSmokeCanisterProp();
+    fitWeaponModel(smokeProp, 0.26);
+    smokeProp.rotation.set(0.2, Math.PI / 2, 0.1);
+    smokeProp.position.set(0.08, 0.02, 0);
+    this.slots.smoke.add(smokeProp);
+    this.smokePrototype = smokeProp;
+    this.smokeLoaded = true;
   }
 
   _loadMachinegunModel() {
@@ -708,8 +794,10 @@ export class WeaponSystem {
     this.lmbHeld = true;
     if (this.currentId === 'melee') this._startSwing();
     if (this.currentId === 'machinegun') this._fireMachinegun(this._playerRef, this._cameraPos);
+    if (this.currentId === 'shotgun') this._fireShotgun(this._playerRef, this._cameraPos);
     if (this.currentId === 'sniper') this._fireSniper(this._playerRef, this._cameraPos);
-    if (this.currentId === 'grenade') this._throwGrenade(this._playerRef, this._cameraPos);
+    if (this.currentId === 'grenade') this._throwThrowable(this._playerRef, this._cameraPos, 'he');
+    if (this.currentId === 'smoke') this._throwThrowable(this._playerRef, this._cameraPos, 'smoke');
   }
 
   _onUp(event) {
@@ -796,17 +884,19 @@ export class WeaponSystem {
 
     const aim = player ? player.getAimDirection(this._traceDir) : this._aimDirRef;
     const cam = cameraPos || this._cameraPos;
-    const sniperScoped = weaponId === 'sniper' && this.scoping && cam && aim;
+    // Scoped MG + sniper: true FOV/crosshair ray (not shoulder parallax).
+    const useCameraRay = this.scoping && this.canScope() && cam && aim
+      && (weaponId === 'sniper' || weaponId === 'machinegun');
 
-    if (sniperScoped) {
-      // Perfect FOV/crosshair ray when stable; small cone only while moving.
+    if (useCameraRay) {
       this._muzzleWorld.copy(cam);
       this._forward.copy(aim).normalize();
-      if (player?.isMoving?.()) {
-        this._applyConeToDirection(this._forward, SNIPER_SCOPED_MOVING_DEG);
-      } else {
-        this._applyConeToDirection(this._forward, SNIPER_SCOPED_STILL_DEG);
+      if (weaponId === 'sniper') {
+        if (player?.isMoving?.()) {
+          this._applyConeToDirection(this._forward, SNIPER_SCOPED_MOVING_DEG);
+        }
       }
+      // MG scoped: bullet is FOV-perfect; heavy recoil applied after the shot.
     } else {
       this._applyBallisticRecoil(player, recoil);
       this._computeFireToCrosshair(cam, player ? player.getAimDirection(this._traceDir) : aim, player);
@@ -827,28 +917,46 @@ export class WeaponSystem {
     if (hitPoint) this._aimEnd.copy(hitPoint);
     else this._aimEnd.copy(this._muzzleWorld).addScaledVector(this._forward, FIRE_AIM_POINT_DIST);
 
-    // Scoped-still tracer is coaxial with the camera → invisible. Offset the
-    // *visual* streak slightly in view-space; hitscan stays on the true ray.
-    let tracerFrom = this._muzzleWorld;
-    let tracerLife = weaponId === 'sniper' ? 0.14 : 0.06;
-    let tracerRadius = weaponId === 'sniper' ? 0.028 : 0.01;
-    if (sniperScoped) {
-      this._viewRight.crossVectors(this._forward, this._worldUp);
-      if (this._viewRight.lengthSq() < 1e-8) this._viewRight.set(1, 0, 0);
-      else this._viewRight.normalize();
-      this._viewLeft.crossVectors(this._viewRight, this._forward).normalize(); // view up
-      tracerFrom = this._muzzleWorld.clone()
-        .addScaledVector(this._forward, 0.85)
-        .addScaledVector(this._viewLeft, -0.045)
-        .addScaledVector(this._viewRight, 0.02);
-      tracerLife = 0.16;
-      tracerRadius = 0.035;
-    }
-    this._spawnTracer(tracerFrom, this._aimEnd, tracerLife, tracerRadius);
+    this._spawnScopedVisibleTracer(
+      this._muzzleWorld,
+      this._forward,
+      this._aimEnd,
+      useCameraRay,
+      weaponId === 'sniper' ? 0.16 : 0.08,
+      weaponId === 'sniper' ? 0.035 : 0.022,
+    );
 
     if (this.net?.inMatch) {
       this.net.tryHitscan(weaponId, this._muzzleWorld, this._forward);
     }
+
+    // Post-shot kick for scoped MG (balance) — after the accurate FOV bullet.
+    if (useCameraRay && weaponId === 'machinegun') {
+      this._applyBallisticRecoil(player, recoil);
+    }
+  }
+
+  /**
+   * Camera-coaxial tracers are invisible. Offset visual origin in view-space;
+   * hitscan origin/dir stay unchanged.
+   */
+  _spawnScopedVisibleTracer(origin, dir, aimEnd, useCameraRay, life, radius) {
+    let tracerFrom = origin;
+    let tracerLife = life;
+    let tracerRadius = radius;
+    if (useCameraRay) {
+      this._viewRight.crossVectors(dir, this._worldUp);
+      if (this._viewRight.lengthSq() < 1e-8) this._viewRight.set(1, 0, 0);
+      else this._viewRight.normalize();
+      this._viewLeft.crossVectors(this._viewRight, dir).normalize();
+      tracerFrom = origin.clone()
+        .addScaledVector(dir, 0.85)
+        .addScaledVector(this._viewLeft, -0.045)
+        .addScaledVector(this._viewRight, 0.02);
+      tracerLife = Math.max(life, 0.12);
+      tracerRadius = Math.max(radius, 0.028);
+    }
+    this._spawnTracer(tracerFrom, aimEnd, tracerLife, tracerRadius);
   }
 
   _fireMachinegun(player, cameraPos) {
@@ -873,7 +981,6 @@ export class WeaponSystem {
       ensureLoaded: () => this._loadSniperModel(),
       interval: SNIPER_FIRE_INTERVAL,
       requireScope: true,
-      // Unused while scoped (camera-ray path); kept for hip/fallback.
       recoil: {
         movingDeg: SNIPER_SCOPED_MOVING_DEG,
         scopedDeg: SNIPER_SCOPED_STILL_DEG,
@@ -884,24 +991,79 @@ export class WeaponSystem {
     });
   }
 
-  _throwGrenade(player, cameraPos) {
-    if (!this.grenadeLoaded) return;
-    if (this.reloading === 'grenade') return;
+  _fireShotgun(player, cameraPos) {
+    if (!this.shotgunLoaded) return;
+    if (this.reloading === 'shotgun') return;
     if (this.actionCooldown > 0) return;
-    if (!this._canUseAmmo('grenade')) {
-      this._startReload('grenade', true);
+    if (!this._canUseAmmo('shotgun')) {
+      this._startReload('shotgun', true);
+      return;
+    }
+
+    this.actionCooldown = SHOTGUN_FIRE_INTERVAL;
+    this.muzzleFlashT = 0.1;
+    if (!this._consumeRound('shotgun')) return;
+
+    const aim = player ? player.getAimDirection(this._traceDir) : this._aimDirRef;
+    const cam = cameraPos || this._cameraPos;
+    this._computeFireToCrosshair(cam, aim, player);
+
+    this._ensureAudio();
+    try {
+      if (typeof this.audio.playShotgunShot === 'function') this.audio.playShotgunShot();
+      else this.audio.playSniperShot();
+    } catch (err) {
+      console.error(err);
+    }
+
+    const pellets = SHOTGUN_PELLETS_MIN
+      + Math.floor(Math.random() * (SHOTGUN_PELLETS_MAX - SHOTGUN_PELLETS_MIN + 1));
+    const origin = this._muzzleWorld.clone();
+
+    for (let i = 0; i < pellets; i += 1) {
+      this._pelletDir.copy(this._forward);
+      this._applyConeToDirection(this._pelletDir, SHOTGUN_SPREAD_DEG);
+      const hitPoint = this.impacts.raycastBullet(origin, this._pelletDir, FIRE_AIM_POINT_DIST);
+      if (hitPoint) this._aimEnd.copy(hitPoint);
+      else this._aimEnd.copy(origin).addScaledVector(this._pelletDir, TRACER_LENGTH);
+      this._spawnTracer(origin, this._aimEnd, 0.07, 0.012);
+      if (this.net?.inMatch) {
+        this.net.tryHitscan('shotgun', origin, this._pelletDir);
+      }
+    }
+
+    this._applyBallisticRecoil(player, {
+      movingDeg: SHOTGUN_RECOIL_MOVING_DEG,
+      scopedDeg: SHOTGUN_RECOIL_STILL_DEG,
+      stillDeg: SHOTGUN_RECOIL_STILL_DEG,
+    });
+  }
+
+  _throwThrowable(player, cameraPos, kind = 'he') {
+    const weaponId = kind === 'smoke' ? 'smoke' : 'grenade';
+    const loaded = kind === 'smoke' ? this.smokeLoaded : this.grenadeLoaded;
+    if (!loaded) return;
+    if (this.reloading === weaponId) return;
+    if (this.actionCooldown > 0) return;
+    if (!this._canUseAmmo(weaponId)) {
+      this._startReload(weaponId, true);
       return;
     }
 
     this.actionCooldown = GRENADE_THROW_INTERVAL;
-    if (!this._consumeRound('grenade')) return;
+    if (!this._consumeRound(weaponId)) return;
     this._ensureAudio();
 
     const aim = player ? player.getAimDirection(this._traceDir) : this._aimDirRef;
     this._computeFireToCrosshair(cameraPos || this._cameraPos, aim, player);
 
     const root = new THREE.Group();
-    if (this.grenadePrototype) {
+    if (kind === 'smoke' && this.smokePrototype) {
+      const body = this.smokePrototype.clone(true);
+      body.position.set(0, 0, 0);
+      body.rotation.set(0, 0, 0);
+      root.add(body);
+    } else if (kind === 'he' && this.grenadePrototype) {
       const body = this.grenadePrototype.clone(true);
       body.position.set(0, 0, 0);
       body.rotation.set(0, 0, 0);
@@ -910,38 +1072,50 @@ export class WeaponSystem {
     } else {
       root.add(new THREE.Mesh(
         new THREE.CylinderGeometry(0.028, 0.032, 0.16, 10),
-        new THREE.MeshStandardMaterial({ color: 0x3f4f32, metalness: 0.45, roughness: 0.5 }),
+        new THREE.MeshStandardMaterial({
+          color: kind === 'smoke' ? 0x6a7a88 : 0x3f4f32,
+          metalness: 0.45,
+          roughness: 0.5,
+        }),
       ));
     }
 
-    // Lit fuse tip + spark emitter (small — stick grenade, not a torch)
-    const fuseTip = new THREE.Mesh(
-      new THREE.SphereGeometry(0.012, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffaa33 }),
-    );
-    fuseTip.position.set(0, 0.14, 0);
-    root.add(fuseTip);
+    let fuseTip = null;
+    let fuseLight = null;
+    let sparks = null;
+    let sparkPos = null;
+    let sparkAge = null;
 
-    const fuseLight = new THREE.PointLight(0xff6622, 0.7, 1.6, 2);
-    fuseLight.position.copy(fuseTip.position);
-    root.add(fuseLight);
+    if (kind === 'he') {
+      fuseTip = new THREE.Mesh(
+        new THREE.SphereGeometry(0.012, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffaa33 }),
+      );
+      fuseTip.position.set(0, 0.14, 0);
+      root.add(fuseTip);
 
-    const sparkGeo = new THREE.BufferGeometry();
-    const sparkCount = 12;
-    const sparkPos = new Float32Array(sparkCount * 3);
-    sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
-    const sparks = new THREE.Points(
-      sparkGeo,
-      new THREE.PointsMaterial({
-        color: 0xffcc66,
-        size: 0.028,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      }),
-    );
-    sparks.frustumCulled = false;
-    root.add(sparks);
+      fuseLight = new THREE.PointLight(0xff6622, 0.7, 1.6, 2);
+      fuseLight.position.copy(fuseTip.position);
+      root.add(fuseLight);
+
+      const sparkGeo = new THREE.BufferGeometry();
+      const sparkCount = 12;
+      sparkPos = new Float32Array(sparkCount * 3);
+      sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+      sparks = new THREE.Points(
+        sparkGeo,
+        new THREE.PointsMaterial({
+          color: 0xffcc66,
+          size: 0.028,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      sparks.frustumCulled = false;
+      root.add(sparks);
+      sparkAge = new Float32Array(sparkCount);
+    }
 
     root.traverse((c) => {
       if (c.isMesh) {
@@ -960,25 +1134,30 @@ export class WeaponSystem {
       vel,
       fuse: GRENADE_FUSE,
       settled: false,
+      kind,
       fuseTip,
       fuseLight,
       sparks,
       sparkPos,
-      sparkAge: new Float32Array(sparkCount),
+      sparkAge,
       fromRemote: false,
     });
 
     if (this.net?.inMatch) {
-      this.net.notifyGrenadeThrow(root.position, vel, GRENADE_FUSE);
+      this.net.notifyGrenadeThrow(root.position, vel, GRENADE_FUSE, kind);
     }
   }
 
-  /** Spawn a visual-only grenade from a remote throw message. */
-  spawnRemoteGrenade(origin, vel, fuse = GRENADE_FUSE) {
+  /** Spawn a visual-only throwable from a remote throw message. */
+  spawnRemoteGrenade(origin, vel, fuse = GRENADE_FUSE, kind = 'he') {
     const root = new THREE.Group();
     root.add(new THREE.Mesh(
       new THREE.CylinderGeometry(0.028, 0.032, 0.16, 10),
-      new THREE.MeshStandardMaterial({ color: 0x3f4f32, metalness: 0.45, roughness: 0.5 }),
+      new THREE.MeshStandardMaterial({
+        color: kind === 'smoke' ? 0x6a7a88 : 0x3f4f32,
+        metalness: 0.45,
+        roughness: 0.5,
+      }),
     ));
     root.position.set(origin[0], origin[1], origin[2]);
     this.scene.add(root);
@@ -987,8 +1166,100 @@ export class WeaponSystem {
       vel: new THREE.Vector3(vel[0], vel[1], vel[2]),
       fuse,
       settled: false,
+      kind,
       fromRemote: true,
     });
+  }
+
+  _spawnSmokeCloud(pos, fromRemote = false) {
+    const group = new THREE.Group();
+    group.position.copy(pos);
+    group.position.y += 0.35;
+
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xb8bcc0,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 20), mat);
+    sphere.scale.setScalar(0.05);
+    group.add(sphere);
+
+    // Soft outer shell for volume
+    const mat2 = mat.clone();
+    mat2.opacity = 0;
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 16), mat2);
+    shell.scale.setScalar(0.05);
+    group.add(shell);
+
+    this.scene.add(group);
+    this.liveSmokes.push({
+      group,
+      sphere,
+      shell,
+      mat,
+      mat2,
+      age: 0,
+      radius: SMOKE_RADIUS,
+      fromRemote,
+    });
+
+    this._ensureAudio();
+    try {
+      if (typeof this.audio.playSmokePop === 'function') this.audio.playSmokePop();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  /** Optional explicit deploy (peers normally simulate from smoke throw fuse). */
+  spawnRemoteSmoke(pos, radius = SMOKE_RADIUS) {
+    const p = Array.isArray(pos)
+      ? new THREE.Vector3(pos[0], pos[1], pos[2])
+      : pos.clone();
+    this._spawnSmokeCloud(p, true);
+    const last = this.liveSmokes[this.liveSmokes.length - 1];
+    if (last) last.radius = radius;
+  }
+
+  _updateSmokes(delta) {
+    for (let i = this.liveSmokes.length - 1; i >= 0; i -= 1) {
+      const s = this.liveSmokes[i];
+      s.age += delta;
+      if (s.age >= SMOKE_TOTAL_SEC) {
+        this.scene.remove(s.group);
+        s.sphere.geometry.dispose();
+        s.shell.geometry.dispose();
+        s.mat.dispose();
+        s.mat2.dispose();
+        this.liveSmokes.splice(i, 1);
+        continue;
+      }
+
+      let scale = 1;
+      let opacity = 0.55;
+      if (s.age < SMOKE_EXPAND_SEC) {
+        const t = s.age / SMOKE_EXPAND_SEC;
+        scale = t;
+        opacity = 0.55 * t;
+      } else if (s.age < SMOKE_EXPAND_SEC + SMOKE_HOLD_SEC) {
+        scale = 1;
+        opacity = 0.55;
+      } else {
+        const t = (s.age - SMOKE_EXPAND_SEC - SMOKE_HOLD_SEC) / SMOKE_SHRINK_SEC;
+        scale = 1;
+        opacity = 0.55 * (1 - t);
+      }
+
+      const r = s.radius * Math.max(0.05, scale);
+      s.sphere.scale.setScalar(r);
+      s.shell.scale.setScalar(r * 1.12);
+      s.mat.opacity = opacity;
+      s.mat2.opacity = opacity * 0.35;
+      s.group.rotation.y += delta * 0.15;
+    }
   }
 
   _updateGrenades(delta) {
@@ -1051,22 +1322,26 @@ export class WeaponSystem {
       }
 
       if (g.fuse <= 0) {
-        try {
-          this._ensureAudio();
-          if (typeof this.audio.playExplosion === 'function') {
-            this.audio.playExplosion();
-          }
-        } catch (err) {
-          console.error(err);
-        }
         const boomPos = g.mesh.position.clone();
-        try {
-          this.impacts.explodeAt(boomPos, 4.0);
-        } catch (err) {
-          console.error(err);
-        }
-        if (!g.fromRemote && this.net?.inMatch) {
-          this.net.resolveGrenadeExplosion(boomPos);
+        if (g.kind === 'smoke') {
+          this._spawnSmokeCloud(boomPos, !!g.fromRemote);
+        } else {
+          try {
+            this._ensureAudio();
+            if (typeof this.audio.playExplosion === 'function') {
+              this.audio.playExplosion();
+            }
+          } catch (err) {
+            console.error(err);
+          }
+          try {
+            this.impacts.explodeAt(boomPos, 4.0);
+          } catch (err) {
+            console.error(err);
+          }
+          if (!g.fromRemote && this.net?.inMatch) {
+            this.net.resolveGrenadeExplosion(boomPos);
+          }
         }
         this.scene.remove(g.mesh);
         g.mesh.traverse((c) => {
@@ -1100,6 +1375,7 @@ export class WeaponSystem {
     }
     this.impacts.update(performance.now() * 0.001, delta);
     this._updateGrenades(delta);
+    this._updateSmokes(delta);
 
     if (this.paused) return;
 

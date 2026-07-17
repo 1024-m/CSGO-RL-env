@@ -6,10 +6,14 @@ export const RESPAWN_SEC = 3.5;
 export const DAMAGE = {
   machinegun: { body: 12, head: 28 },
   sniper: { body: 55, head: 100 },
+  shotgun: { body: 9, head: 16 }, // per pellet
   melee: { body: 35, head: 50 },
   flamethrower: { body: 6, head: 8 }, // per tick
   grenade: { max: 80, radius: 4.0 },
 };
+
+/** Smoke cover radius = HE blast radius + 10%. */
+export const SMOKE_RADIUS = DAMAGE.grenade.radius * 1.1;
 
 export const MELEE_RANGE = 1.85;
 export const FLAME_RANGE = 5.2;

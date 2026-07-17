@@ -77,6 +77,55 @@ function createSniperShotBuffer(ctx) {
   return buffer;
 }
 
+/** Wide boom + pellet hiss — distinct from sniper crack. */
+function createShotgunShotBuffer(ctx) {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(0.55 * rate);
+  const buffer = ctx.createBuffer(1, length, rate);
+  const data = buffer.getChannelData(0);
+  let brown = 0;
+  let prev = 0;
+  for (let i = 0; i < length; i += 1) {
+    const t = i / rate;
+    const white = Math.random() * 2 - 1;
+    const hp = white - prev;
+    prev = white;
+    brown += white * 0.03;
+    brown *= 0.99;
+
+    const blastEnv = Math.exp(-t * 14) * (t < 0.003 ? t / 0.003 : 1);
+    const blast = brown * blastEnv * 2.8 + white * blastEnv * 0.9;
+
+    const pelletEnv = Math.exp(-t * 22);
+    const pellets = hp * pelletEnv * 1.3 + white * pelletEnv * 0.55;
+
+    const body = Math.sin(2 * Math.PI * 90 * t) * Math.exp(-t * 12) * 0.4;
+    data[i] = Math.tanh((blast + pellets + body) * 0.75);
+  }
+  let peak = 1e-6;
+  for (let i = 0; i < length; i += 1) peak = Math.max(peak, Math.abs(data[i]));
+  const norm = 0.95 / peak;
+  for (let i = 0; i < length; i += 1) data[i] *= norm;
+  return buffer;
+}
+
+function createSmokePopBuffer(ctx) {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(0.7 * rate);
+  const buffer = ctx.createBuffer(1, length, rate);
+  const data = buffer.getChannelData(0);
+  let a = 0;
+  for (let i = 0; i < length; i += 1) {
+    const t = i / rate;
+    const white = Math.random() * 2 - 1;
+    a = a * 0.94 + white * 0.06;
+    const pop = Math.exp(-t * 40) * white * 0.5;
+    const hiss = a * Math.exp(-t * 2.2) * (1 - Math.exp(-t * 25));
+    data[i] = pop + hiss * 0.85;
+  }
+  return buffer;
+}
+
 function createMeleeBuffer(ctx) {
   const rate = ctx.sampleRate;
   const length = Math.floor(0.22 * rate);
@@ -230,6 +279,8 @@ export class WeaponAudio {
 
       this.buffers.machinegun = createMachinegunShotBuffer(this.ctx);
       this.buffers.sniper = createSniperShotBuffer(this.ctx);
+      this.buffers.shotgun = createShotgunShotBuffer(this.ctx);
+      this.buffers.smoke = createSmokePopBuffer(this.ctx);
       this.buffers.melee = createMeleeBuffer(this.ctx);
       this.buffers.flame = createFlameLoopBuffer(this.ctx);
       this.buffers.explosion = createExplosionBuffer(this.ctx);
@@ -275,6 +326,19 @@ export class WeaponAudio {
     // Louder / heavier than MG — slight rate jitter only, keep body intact
     const rate = 0.97 + Math.random() * 0.04;
     this._playBuffer(this.buffers.sniper, { volume: 1.45, playbackRate: rate });
+  }
+
+  playShotgunShot() {
+    if (!this.ready) return;
+    this._resumeIfNeeded();
+    const rate = 0.95 + Math.random() * 0.06;
+    this._playBuffer(this.buffers.shotgun, { volume: 1.25, playbackRate: rate });
+  }
+
+  playSmokePop() {
+    if (!this.ready) return;
+    this._resumeIfNeeded();
+    this._playBuffer(this.buffers.smoke, { volume: 0.75, playbackRate: 0.95 + Math.random() * 0.08 });
   }
 
   playExplosion() {

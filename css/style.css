@@ -101,7 +101,9 @@ body {
 }
 
 #weapon-hud[data-weapon="melee"] { background-position: calc(3 * 100% / 7) calc(0 * 100% / 5); }
+#weapon-hud[data-weapon="smoke"] { background-position: calc(4 * 100% / 7) calc(1 * 100% / 5); }
 #weapon-hud[data-weapon="grenade"] { background-position: calc(5 * 100% / 7) calc(1 * 100% / 5); }
+#weapon-hud[data-weapon="shotgun"] { background-position: calc(3 * 100% / 7) calc(2 * 100% / 5); }
 #weapon-hud[data-weapon="machinegun"] { background-position: calc(1 * 100% / 7) calc(3 * 100% / 5); }
 #weapon-hud[data-weapon="sniper"] { background-position: calc(6 * 100% / 7) calc(3 * 100% / 5); }
 #weapon-hud[data-weapon="flamethrower"] { background-position: calc(4 * 100% / 7) calc(3 * 100% / 5); }

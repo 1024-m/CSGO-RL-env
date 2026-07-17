@@ -5,7 +5,7 @@ import { InteractableManager } from './interactables.js';
 import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT } from './collision.js';
 import { WeatherSystem } from './weather.js';
 import { Minimap, collectMapMeshes } from './minimap.js?v=10';
-import { WeaponSystem } from './weapons.js?v=12';
+import { WeaponSystem } from './weapons.js?v=13';
 import { GameMenu } from './ui-menu.js';
 import { NetClient, SPAWN_OFFSETS } from './net.js';
 
@@ -210,7 +210,7 @@ net.onRemoteFire = (msg) => {
 
 net.onRemoteGrenadeThrow = (msg) => {
   if (weapons && msg.origin && msg.vel) {
-    weapons.spawnRemoteGrenade(msg.origin, msg.vel, msg.fuse);
+    weapons.spawnRemoteGrenade(msg.origin, msg.vel, msg.fuse, msg.kind || 'he');
   }
 };
 
