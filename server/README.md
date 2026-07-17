@@ -3,11 +3,16 @@ title: RL-PVP
 emoji: 🎯
 colorFrom: green
 colorTo: blue
-sdk: gradio
-sdk_version: "5.49.1"
-app_file: app.py
-python_version: "3.11"
+sdk: docker
+app_port: 7860
 pinned: false
 ---
 
-Dust2 PvP lobby board + match relay.
+Public **match server** for Dust2 Explorer (not the game client).
+
+Play / spectate from the local game (`bash start.sh` → `http://localhost:8080`).
+This Space page is the live lobby board.
+
+- Health: `/api/health`
+- Lobbies: `/api/lobbies`
+- Match WS: `/ws/match/{mode}/{lobby_id}?user=...&role=play|spectate`

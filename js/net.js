@@ -6,12 +6,12 @@ const STATE_INTERVAL = 1 / STATE_HZ;
 const LOBBY_POLL_MS = 1000;
 const HEARTBEAT_MS = 3000;
 
-function wsUrl(spaceUrl, mode, lobbyId, username) {
+function wsUrl(spaceUrl, mode, lobbyId, username, role = 'play') {
   const base = (spaceUrl || window.location.origin).replace(/\/$/, '');
   const u = new URL(base);
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
   u.pathname = `/ws/match/${encodeURIComponent(mode)}/${encodeURIComponent(lobbyId)}`;
-  u.search = `user=${encodeURIComponent(username)}`;
+  u.search = `user=${encodeURIComponent(username)}&role=${encodeURIComponent(role)}`;
   return u.toString();
 }
 
@@ -43,8 +43,10 @@ export class NetClient {
     this._spawnIndex = 0;
     this.players = [];
     this.teamAlive = { teamA: true, teamB: true };
+    this.spectating = false;
 
     this.combat.onDeath = (from) => {
+      if (this.spectating) return;
       this.send({ type: 'state', pos: this._lastPos, rot: this._lastRot, hp: 0, alive: false, weapon: this._weapon });
       this._checkTeamWipe();
     };
@@ -158,14 +160,29 @@ export class NetClient {
 
   connectMatch() {
     if (!this.lobbyId || !this.mode) return;
+    this._openMatchWs('play');
+  }
+
+  /** Watch a live / starting lobby without taking a seat. */
+  connectSpectate(mode, lobbyId) {
+    if (!mode || !lobbyId || !this.username) return;
+    this.mode = mode;
+    this.lobbyId = lobbyId;
+    this.seat = null;
+    this.side = 'ffa';
+    this._openMatchWs('spectate');
+  }
+
+  _openMatchWs(role) {
     this.disconnectMatch(false);
-    const url = wsUrl(this.spaceUrl, this.mode, this.lobbyId, this.username);
-    this.onStatus('Connecting to match…');
+    this.spectating = role === 'spectate';
+    const url = wsUrl(this.spaceUrl, this.mode, this.lobbyId, this.username, role);
+    this.onStatus(this.spectating ? 'Connecting as spectator…' : 'Connecting to match…');
     const ws = new WebSocket(url);
     this.ws = ws;
 
     ws.onopen = () => {
-      this.onStatus('Waiting for match start…');
+      this.onStatus(this.spectating ? 'Waiting for match (spectate)…' : 'Waiting for match start…');
       this.send({ type: 'ready', username: this.username });
     };
 
@@ -202,11 +219,13 @@ export class NetClient {
     this.ws = null;
     this.inMatch = false;
     this.matchId = null;
+    this.spectating = false;
     if (clearGhosts) this.ghosts.clear();
   }
 
   send(msg) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.spectating && msg?.type && msg.type !== 'ping' && msg.type !== 'ready') return;
     this.ws.send(JSON.stringify(msg));
   }
 
@@ -224,19 +243,23 @@ export class NetClient {
       this.inMatch = true;
       this.matchId = msg.matchId;
       this.players = msg.players || [];
-      this.seat = msg.seat || this.seat;
-      this.side = seatSide(this.seat);
-      this.ghosts.syncPlayers(this.players, this.username);
+      this.spectating = !!msg.spectating || this.spectating;
+      this.seat = this.spectating ? null : (msg.seat || this.seat);
+      this.side = this.spectating ? 'ffa' : seatSide(this.seat);
+      // Spectators see everyone (no self username to hide)
+      const hideSelf = this.spectating ? null : this.username;
+      this.ghosts.syncPlayers(this.players, hideSelf);
       this.combat.reset();
-      this._spawnIndex = spawnIndexFor(this.seat, this.mode, this.players);
+      this._spawnIndex = this.spectating ? 0 : spawnIndexFor(this.seat, this.mode, this.players);
       this.onMatchStart({
         mode: msg.mode || this.mode,
         seat: this.seat,
         side: this.side,
         players: this.players,
         spawnIndex: this._spawnIndex,
+        spectating: this.spectating,
       });
-      this.onStatus(`Match live — ${this.mode}`);
+      this.onStatus(this.spectating ? `Spectating ${this.mode} · ${this.lobbyId}` : `Match live — ${this.mode}`);
       return;
     }
     if (type === 'player_joined' || type === 'player_left') {
@@ -248,7 +271,7 @@ export class NetClient {
       this.ghosts.applyState(msg.from, msg);
       return;
     }
-    if (type === 'hit' && msg.target === this.username) {
+    if (type === 'hit' && msg.target === this.username && !this.spectating) {
       this.combat.applyDamage(msg.damage || 0, msg.from);
       return;
     }
@@ -283,6 +306,7 @@ export class NetClient {
     if (!this.inMatch || !player) return;
     this.combat.update(performance.now() * 0.001);
     this.ghosts.update(delta);
+    if (this.spectating) return;
 
     this._stateAcc += delta;
     if (this._stateAcc >= STATE_INTERVAL) {
@@ -306,7 +330,7 @@ export class NetClient {
   // ── Combat helpers used by WeaponSystem ───────────────────────────
 
   tryHitscan(weaponId, origin, dir) {
-    if (!this.inMatch || !this.combat.alive) return null;
+    if (!this.inMatch || this.spectating || !this.combat.alive) return null;
     const hit = this.ghosts.raycast(origin, dir, 80);
     if (!hit) {
       this.send({
@@ -338,7 +362,7 @@ export class NetClient {
   }
 
   tryFlameTick(origin, forward, delta) {
-    if (!this.inMatch || !this.combat.alive) return;
+    if (!this.inMatch || this.spectating || !this.combat.alive) return;
     this._flameAcc += delta;
     if (this._flameAcc < 0.1) return;
     this._flameAcc = 0;
@@ -360,7 +384,7 @@ export class NetClient {
   }
 
   notifyGrenadeThrow(origin, vel, fuse, kind = 'he') {
-    if (!this.inMatch) return;
+    if (!this.inMatch || this.spectating) return;
     this.send({
       type: 'grenade_throw',
       origin: [origin.x, origin.y, origin.z],
@@ -371,7 +395,7 @@ export class NetClient {
   }
 
   resolveGrenadeExplosion(pos) {
-    if (!this.inMatch || !this.combat.alive) return;
+    if (!this.inMatch || this.spectating || !this.combat.alive) return;
     const radius = DAMAGE.grenade.radius;
     this.send({
       type: 'grenade_explode',
@@ -398,7 +422,7 @@ export class NetClient {
   }
 
   tryMelee(origin, forward) {
-    if (!this.inMatch || !this.combat.alive) return;
+    if (!this.inMatch || this.spectating || !this.combat.alive) return;
     let best = null;
     this.ghosts.forEach((username, g) => {
       if (!g.mesh.visible) return;
@@ -427,7 +451,7 @@ export class NetClient {
   }
 
   _checkTeamWipe() {
-    if (this.mode === 'sandbox') return;
+    if (this.spectating || this.mode === 'sandbox') return;
     // Soft check: announce if we think our side is wiped — peers also track
     // Full authority is weak; send match_end when local sees all enemies dead via state
     let enemyAlive = false;
@@ -452,9 +476,13 @@ export class NetClient {
 
 function seatSide(seat) {
   if (!seat) return 'ffa';
-  if (seat === 'A' || seat === 'B') return seat;
-  if (String(seat).startsWith('teamA')) return 'teamA';
-  if (String(seat).startsWith('teamB')) return 'teamB';
+  const s = String(seat);
+  if (s.startsWith('X-')) return 'X';
+  if (s.startsWith('Y-')) return 'Y';
+  // legacy seats (old Space / cached clients)
+  if (s === 'A' || s === 'B') return s;
+  if (s.startsWith('teamA')) return 'teamA';
+  if (s.startsWith('teamB')) return 'teamB';
   return 'ffa';
 }
 
@@ -466,12 +494,18 @@ function isEnemy(mySide, theirSide, mode) {
 
 /** Deterministic spawn slot from seat. */
 export function spawnIndexFor(seat, mode, players) {
-  if (mode === '1v1') return seat === 'B' ? 1 : 0;
+  if (mode === '1v1') {
+    return seat === 'Y-1' || seat === 'B' ? 1 : 0;
+  }
   if (mode === '4v4') {
-    const m = String(seat).match(/team([AB])-(\d)/);
+    const m = String(seat).match(/^(?:team)?([ABXY])-(\d)$/i);
     if (!m) return 0;
-    const side = m[1] === 'A' ? 0 : 4;
-    return side + Number(m[2]);
+    const letter = m[1].toUpperCase();
+    const side = letter === 'Y' || letter === 'B' ? 4 : 0;
+    const n = Number(m[2]);
+    // X-1..X-4 / Y-1..Y-4 (1-based); legacy teamA-0..3 (0-based)
+    const slot = n >= 1 && /[XY]/i.test(letter) ? n - 1 : n;
+    return side + Math.max(0, Math.min(3, slot));
   }
   // sandbox: index among players
   const names = (players || []).map((p) => p.username).sort();

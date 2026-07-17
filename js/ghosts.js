@@ -36,7 +36,7 @@ export class GhostManager {
       if (!p.username || p.username === selfName) continue;
       keep.add(p.username);
       if (!this.ghosts.has(p.username)) {
-        const color = p.side === 'teamB' || p.side === 'B' ? 0xe85d4c : 0x3aa0ff;
+        const color = p.side === 'Y' || p.side === 'teamB' || p.side === 'B' ? 0xe85d4c : 0x3aa0ff;
         const mesh = makeGhostMesh(color);
         this.scene.add(mesh);
         this.ghosts.set(p.username, {

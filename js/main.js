@@ -253,6 +253,10 @@ const menu = new GameMenu({
     }
     net.connectMatch();
   },
+  onSpectate: (mode, lobbyId) => {
+    net.connectSpectate(mode, lobbyId);
+    setStatus(`Spectating ${lobbyId}…`);
+  },
 });
 
 async function bootIdentity() {
@@ -318,17 +322,19 @@ function enterGameplay(info) {
   if (hud) hud.hidden = false;
   applySpawn(info.spawnIndex ?? 0);
   player.enable();
+  const spectating = !!info.spectating;
   if (weapons) {
-    weapons.paused = false;
-    weapons.net = net;
+    weapons.paused = spectating;
+    weapons.net = spectating ? null : net;
+    weapons.lmbHeld = false;
   }
   net.combat.reset();
-  setCrosshairVisible(true);
+  setCrosshairVisible(!spectating);
   if (minimapWrap) {
     minimap._pinBottomLeft();
     minimapWrap.hidden = false;
   }
-  setStatus(CONTROLS_LINE);
+  setStatus(spectating ? 'Spectating — WASD move, mouse look. No weapons.' : CONTROLS_LINE);
   document.exitPointerLock?.();
 }
 

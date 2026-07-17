@@ -9,6 +9,7 @@ export class GameMenu {
     onClaim,
     onLeaveSeat,
     onEnterMatch,
+    onSpectate,
   }) {
     this.root = root;
     this.onSandbox = onSandbox;
@@ -17,6 +18,7 @@ export class GameMenu {
     this.onClaim = onClaim;
     this.onLeaveSeat = onLeaveSeat;
     this.onEnterMatch = onEnterMatch;
+    this.onSpectate = onSpectate;
     this.screen = 'start'; // start | lobby
     this.mode = null;
     this.username = null;
@@ -73,8 +75,12 @@ export class GameMenu {
   showStart() {
     this.screen = 'start';
     this.mode = null;
+    this.selectedLobby = null;
     if (this.els.start) this.els.start.hidden = false;
     if (this.els.lobby) this.els.lobby.hidden = true;
+    if (this.els.lobbyList) this.els.lobbyList.innerHTML = '';
+    if (this.els.lobbyMeta) this.els.lobbyMeta.textContent = '';
+    if (this.els.lobbyTitle) this.els.lobbyTitle.textContent = 'Lobbies';
     this._setError('');
   }
 
@@ -106,6 +112,39 @@ export class GameMenu {
     }
   }
 
+  _seatLabel(seatKey) {
+    const m = String(seatKey).match(/^([XYS])-(\d+)$/i);
+    if (!m) return { team: null, label: seatKey, cls: '' };
+    const t = m[1].toUpperCase();
+    return {
+      team: t === 'S' ? null : t,
+      label: m[2],
+      cls: t === 'X' ? 'team-x' : t === 'Y' ? 'team-y' : '',
+    };
+  }
+
+  _makeSeatBtn(mode, lobby, seat, user) {
+    const meta = this._seatLabel(seat);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `seat-btn ${meta.cls}${user ? ' filled' : ''}`.trim();
+    btn.disabled = !!user || lobby.status === 'live' || lobby.status === 'starting';
+    btn.title = seat; // internal id (X-1, Y-2, …)
+    btn.innerHTML = user
+      ? `${meta.label}<span class="seat-who">${user}</span>`
+      : meta.label;
+    btn.addEventListener('click', async () => {
+      try {
+        this._setError('');
+        await this.onClaim?.(mode, lobby.id, seat);
+        this.selectedLobby = lobby.id;
+      } catch (err) {
+        this._setError(err.message || String(err));
+      }
+    });
+    return btn;
+  }
+
   renderBoard(board, mode, error = null) {
     const list = this.els.lobbyList;
     if (!list) return;
@@ -132,38 +171,76 @@ export class GameMenu {
       head.innerHTML = `<strong>${lobby.id}</strong><span>${lobby.filled}/${lobby.capacity} · ${lobby.status}</span>`;
       card.appendChild(head);
 
-      const seats = document.createElement('div');
-      seats.className = 'lobby-seats';
-
       const seatEntries = Object.entries(lobby.seats || {});
-      for (const [seat, user] of seatEntries) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'seat-btn' + (user ? ' filled' : '');
-        btn.disabled = !!user || lobby.status === 'live';
-        btn.textContent = user ? `${seat}: ${user}` : `Join ${seat}`;
-        btn.addEventListener('click', async () => {
-          try {
-            this._setError('');
-            await this.onClaim?.(mode, lobby.id, seat);
-            this.selectedLobby = lobby.id;
-          } catch (err) {
-            this._setError(err.message || String(err));
-          }
-        });
-        seats.appendChild(btn);
+      const xs = seatEntries.filter(([k]) => /^X-/i.test(k));
+      const ys = seatEntries.filter(([k]) => /^Y-/i.test(k));
+
+      if (xs.length || ys.length) {
+        const row = document.createElement('div');
+        row.className = 'lobby-seats teams';
+        const left = document.createElement('div');
+        left.className = 'team-col team-x';
+        const right = document.createElement('div');
+        right.className = 'team-col team-y';
+        for (const [seat, user] of xs) left.appendChild(this._makeSeatBtn(mode, lobby, seat, user));
+        for (const [seat, user] of ys) right.appendChild(this._makeSeatBtn(mode, lobby, seat, user));
+        row.appendChild(left);
+        if (lobby.status === 'live' || lobby.status === 'starting') {
+          const mid = document.createElement('div');
+          mid.className = 'team-mid';
+          const spec = document.createElement('button');
+          spec.type = 'button';
+          spec.className = 'seat-btn spectate-btn';
+          spec.textContent = 'Spectate';
+          spec.addEventListener('click', async () => {
+            try {
+              this._setError('');
+              this.selectedLobby = lobby.id;
+              await this.onSpectate?.(mode, lobby.id);
+            } catch (err) {
+              this._setError(err.message || String(err));
+            }
+          });
+          mid.appendChild(spec);
+          row.appendChild(mid);
+        }
+        row.appendChild(right);
+        card.appendChild(row);
+      } else {
+        const seats = document.createElement('div');
+        seats.className = 'lobby-seats';
+        for (const [seat, user] of seatEntries) {
+          seats.appendChild(this._makeSeatBtn(mode, lobby, seat, user));
+        }
+        if (lobby.status === 'live' || lobby.status === 'starting') {
+          const spec = document.createElement('button');
+          spec.type = 'button';
+          spec.className = 'seat-btn spectate-btn';
+          spec.textContent = 'Spectate';
+          spec.addEventListener('click', async () => {
+            try {
+              this._setError('');
+              this.selectedLobby = lobby.id;
+              await this.onSpectate?.(mode, lobby.id);
+            } catch (err) {
+              this._setError(err.message || String(err));
+            }
+          });
+          seats.appendChild(spec);
+        }
+        card.appendChild(seats);
       }
-      card.appendChild(seats);
+
       list.appendChild(card);
     }
 
     if (this.els.lobbyMeta) {
       this.els.lobbyMeta.textContent =
         mode === '1v1'
-          ? 'Match starts when both A and B are filled.'
+          ? 'Red vs blue — match starts when both sides have a player. Spectate is read-only.'
           : mode === '4v4'
-            ? 'Starts when full, or after 60s idle with ≥1 player per side.'
-            : 'Sandbox starts as soon as you join a lobby.';
+            ? 'Red (left) vs blue (right). Starts when full, or after 60s idle with ≥1 per side.'
+            : 'Sandbox starts when you join. Spectate watches a live lobby without taking a seat.';
     }
   }
 }

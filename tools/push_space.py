@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot / periodic push of server/ to your HF Space (no Docker)."""
+"""Push server/ to your HF Space (Docker SDK — sole uvicorn on :7860)."""
 
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ def main() -> int:
     repo_id = f"{user}/{SPACE_NAME}"
     api = HfApi(token=token)
     try:
-        create_repo(repo_id, repo_type="space", space_sdk="gradio", exist_ok=True, token=token)
+        # Existing Spaces keep their SDK until README frontmatter says docker.
+        create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True, token=token)
     except Exception as exc:
         print(f"create_repo: {exc}")
 
@@ -53,7 +54,7 @@ def main() -> int:
         repo_id=repo_id,
         repo_type="space",
         token=token,
-        ignore_patterns=[".venv/**", "__pycache__/**", "*.pyc"],
+        ignore_patterns=[".venv/**", "__pycache__/**", "*.pyc", ".git/**"],
     )
 
     # HF runtime subdomains are lowercase; spaces → hyphens

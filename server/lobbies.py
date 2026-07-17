@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import string
 import time
 from typing import Any, Optional
 
-# Fixed lobby counts
-SANDBOX_COUNT = 4
-DUEL_COUNT = 8
-SQUAD_COUNT = 4
+# Lobby IDs: 0A–0X, 1A–1H, 4A–4H (category is already in the mode UI)
+_LETTERS = string.ascii_uppercase
+SANDBOX_IDS = [f"0{ch}" for ch in _LETTERS[:10]]  # 0A … 0J
+DUEL_IDS = [f"1{ch}" for ch in _LETTERS[:8]]  # 1A … 1H
+SQUAD_IDS = [f"4{ch}" for ch in _LETTERS[:8]]  # 4A … 4H
 
-SANDBOX_CAP = 8
+SANDBOX_CAP = 1  # one seat per sandbox lobby
 DUEL_CAP = 2
 SQUAD_CAP = 8  # 4 + 4
 
@@ -27,7 +29,7 @@ def _empty_sandbox(lobby_id: str) -> dict[str, Any]:
     return {
         "id": lobby_id,
         "mode": "sandbox",
-        "seats": {str(i): None for i in range(SANDBOX_CAP)},
+        "seats": {f"S-{i}": None for i in range(1, SANDBOX_CAP + 1)},
         "status": "open",  # open | starting | live
         "last_change": _now(),
         "match_id": None,
@@ -38,7 +40,7 @@ def _empty_duel(lobby_id: str) -> dict[str, Any]:
     return {
         "id": lobby_id,
         "mode": "1v1",
-        "seats": {"A": None, "B": None},
+        "seats": {"X-1": None, "Y-1": None},
         "status": "open",
         "last_change": _now(),
         "match_id": None,
@@ -47,8 +49,8 @@ def _empty_duel(lobby_id: str) -> dict[str, Any]:
 
 def _empty_squad(lobby_id: str) -> dict[str, Any]:
     seats: dict[str, Optional[str]] = {}
-    for side in ("teamA", "teamB"):
-        for i in range(4):
+    for side in ("X", "Y"):
+        for i in range(1, 5):
             seats[f"{side}-{i}"] = None
     return {
         "id": lobby_id,
@@ -63,14 +65,11 @@ def _empty_squad(lobby_id: str) -> dict[str, Any]:
 class LobbyBoard:
     def __init__(self) -> None:
         self.lobbies: dict[str, dict[str, Any]] = {}
-        for i in range(SANDBOX_COUNT):
-            lid = f"sandbox-{i}"
+        for lid in SANDBOX_IDS:
             self.lobbies[lid] = _empty_sandbox(lid)
-        for i in range(DUEL_COUNT):
-            lid = f"1v1-{i}"
+        for lid in DUEL_IDS:
             self.lobbies[lid] = _empty_duel(lid)
-        for i in range(SQUAD_COUNT):
-            lid = f"4v4-{i}"
+        for lid in SQUAD_IDS:
             self.lobbies[lid] = _empty_squad(lid)
         # username -> (lobby_id, seat)
         self.by_user: dict[str, tuple[str, str]] = {}
@@ -78,9 +77,9 @@ class LobbyBoard:
     def snapshot(self) -> dict[str, Any]:
         self._tick_stale_and_start()
         return {
-            "sandbox": [self._public(self.lobbies[f"sandbox-{i}"]) for i in range(SANDBOX_COUNT)],
-            "duel": [self._public(self.lobbies[f"1v1-{i}"]) for i in range(DUEL_COUNT)],
-            "squad": [self._public(self.lobbies[f"4v4-{i}"]) for i in range(SQUAD_COUNT)],
+            "sandbox": [self._public(self.lobbies[lid]) for lid in SANDBOX_IDS],
+            "duel": [self._public(self.lobbies[lid]) for lid in DUEL_IDS],
+            "squad": [self._public(self.lobbies[lid]) for lid in SQUAD_IDS],
             "serverTime": _now(),
         }
 
@@ -194,16 +193,16 @@ class LobbyBoard:
             return False
 
         if mode == "1v1":
-            if seats.get("A") and seats.get("B"):
+            if seats.get("X-1") and seats.get("Y-1"):
                 return self._mark_starting(lobby)
             return False
 
         # 4v4
-        team_a = [s for s, u in seats.items() if u and s.startswith("teamA")]
-        team_b = [s for s, u in seats.items() if u and s.startswith("teamB")]
+        team_x = [s for s, u in seats.items() if u and s.startswith("X-")]
+        team_y = [s for s, u in seats.items() if u and s.startswith("Y-")]
         if len(filled) >= SQUAD_CAP:
             return self._mark_starting(lobby)
-        if team_a and team_b and (_now() - lobby["last_change"]) >= SQUAD_IDLE_START_SEC:
+        if team_x and team_y and (_now() - lobby["last_change"]) >= SQUAD_IDLE_START_SEC:
             return self._mark_starting(lobby)
         return False
 
@@ -228,12 +227,10 @@ class LobbyBoard:
         for seat, user in lobby["seats"].items():
             if user:
                 side = "ffa"
-                if seat in ("A", "B"):
-                    side = seat
-                elif seat.startswith("teamA"):
-                    side = "teamA"
-                elif seat.startswith("teamB"):
-                    side = "teamB"
+                if seat.startswith("X-"):
+                    side = "X"
+                elif seat.startswith("Y-"):
+                    side = "Y"
                 out.append({"username": user, "seat": seat, "side": side})
         return out
 

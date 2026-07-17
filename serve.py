@@ -183,8 +183,10 @@ async def api_heartbeat(body: HeartbeatBody):
 
 
 @app.websocket("/ws/match/{mode}/{lobby_id}")
-async def api_match_ws(ws: WebSocket, mode: str, lobby_id: str, user: str = ""):
-    await handle_match_ws(ws, mode, lobby_id, user)
+async def api_match_ws(
+    ws: WebSocket, mode: str, lobby_id: str, user: str = "", role: str = "play"
+):
+    await handle_match_ws(ws, mode, lobby_id, user, role=role)
 
 
 @app.get("/{path:path}")
