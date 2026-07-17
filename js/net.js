@@ -26,6 +26,7 @@ export class NetClient {
     this.username = null;
     this.avatarUrl = null;
     this.spaceUrl = null;
+    this.playAllowed = true;
     this.mode = null; // sandbox | 1v1 | 4v4
     this.lobbyId = null;
     this.seat = null;
@@ -54,13 +55,18 @@ export class NetClient {
 
   async initLocal() {
     const cfg = await fetch('/api/config').then((r) => r.json());
-    // Empty spaceUrl = same origin. Config auto-picks HF Space when healthy.
+    // spaceUrl = match WS host when Space is up. Lobby HTTP is always same-origin.
     this.spaceUrl = cfg.spaceUrl || '';
     this.username = cfg.username || null;
+    this.playAllowed = cfg.playAllowed !== false;
     this.avatarUrl = cfg.avatarUrl || (this.username
       ? `https://huggingface.co/avatars/${encodeURIComponent(this.username)}`
       : null);
-    if (!cfg.hasToken || !this.username) {
+    if (!this.username) {
+      return { ok: false, error: cfg.authError || 'No player identity' };
+    }
+    // Local play needs HF_TOKEN. Space host is spectate-only (guest ok).
+    if (this.playAllowed && cfg.hasToken === false && cfg.host !== 'space') {
       return { ok: false, error: cfg.authError || 'Set HF_TOKEN in .env.local' };
     }
     return {
@@ -68,31 +74,21 @@ export class NetClient {
       username: this.username,
       avatarUrl: this.avatarUrl,
       spaceUrl: this.spaceUrl || window.location.origin,
+      playAllowed: this.playAllowed,
     };
   }
 
   _lobbyBase() {
-    return this.spaceUrl || '';
+    // Claims / lobby poll always hit same origin (local proxies to Space with HF token).
+    return '';
   }
 
   async _fetchLobbies() {
-    const tryBase = async (base) => {
-      const res = await fetch(`${base}/api/lobbies`);
-      if (!res.ok) throw new Error(`Lobby server ${res.status}`);
-      const board = await res.json();
-      if (!board?.duel && !board?.sandbox) throw new Error('Bad lobby payload');
-      return board;
-    };
-    try {
-      return await tryBase(this._lobbyBase());
-    } catch (err) {
-      // Space dead mid-session → fall back to local without touching env
-      if (this.spaceUrl) {
-        this.spaceUrl = '';
-        return await tryBase('');
-      }
-      throw err;
-    }
+    const res = await fetch(`${this._lobbyBase()}/api/lobbies`);
+    if (!res.ok) throw new Error(`Lobby server ${res.status}`);
+    const board = await res.json();
+    if (!board?.duel && !board?.sandbox) throw new Error('Bad lobby payload');
+    return board;
   }
 
   startLobbyPoll(mode) {
@@ -129,14 +125,20 @@ export class NetClient {
   }
 
   async claim(mode, lobbyId, seat) {
-    const base = this.spaceUrl || '';
-    const res = await fetch(`${base}/api/lobbies/${encodeURIComponent(mode)}/${encodeURIComponent(lobbyId)}/claim`, {
+    if (!this.playAllowed) throw new Error('Play disabled here — spectate only');
+    // Always same-origin — local host proxies to Space with HF_TOKEN.
+    const res = await fetch(`/api/lobbies/${encodeURIComponent(mode)}/${encodeURIComponent(lobbyId)}/claim`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: this.username, seat }),
     });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'claim failed');
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`claim failed (${res.status})`);
+    }
+    if (!res.ok || !data.ok) throw new Error(data.error || `claim failed (${res.status})`);
     this.mode = mode;
     this.lobbyId = lobbyId;
     this.seat = seat;
@@ -148,7 +150,7 @@ export class NetClient {
   async leaveLobby() {
     this.disconnectMatch();
     if (!this.username) return;
-    const base = this.spaceUrl || '';
+    const base = this._lobbyBase();
     await fetch(`${base}/api/lobbies/leave`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -159,6 +161,10 @@ export class NetClient {
   }
 
   connectMatch() {
+    if (!this.playAllowed) {
+      this.onStatus('Play disabled here — spectate only');
+      return;
+    }
     if (!this.lobbyId || !this.mode) return;
     this._openMatchWs('play');
   }

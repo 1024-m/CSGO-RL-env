@@ -1,4 +1,4 @@
-# Sole process binds :7860 — Gradio SDK would also bind and crash with EADDRINUSE.
+# Sole process binds :7860. Serves API + full Dust2 game client (www/).
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -10,6 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py lobbies.py relay.py ./
+COPY www ./www
 
 EXPOSE 7860
 

@@ -6,8 +6,8 @@ import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT }
 import { WeatherSystem } from './weather.js';
 import { Minimap, collectMapMeshes } from './minimap.js?v=10';
 import { WeaponSystem } from './weapons.js?v=17';
-import { GameMenu } from './ui-menu.js';
-import { NetClient, SPAWN_OFFSETS } from './net.js';
+import { GameMenu } from './ui-menu.js?v=23';
+import { NetClient, SPAWN_OFFSETS } from './net.js?v=23';
 
 const DAMAGE_VIGNETTE_SEC = 2;
 
@@ -265,6 +265,7 @@ async function bootIdentity() {
     username: net.username,
     spaceUrl: net.spaceUrl,
     authError: res.ok ? null : res.error,
+    playAllowed: net.playAllowed,
   });
   setPlayerIdentityHud({
     username: net.username,
@@ -272,8 +273,33 @@ async function bootIdentity() {
   });
   setHpHud(net.combat.hp, net.combat.alive);
   lastHp = net.combat.hp;
-  if (!res.ok) setStatus(res.error);
-  else setStatus(`Online as ${net.username}`);
+  if (!res.ok) {
+    setStatus(res.error);
+    return;
+  }
+  setStatus(net.playAllowed ? `Online as ${net.username}` : `Spectating as ${net.username}`);
+  // Deep link: /?spectate=1&mode=sandbox&lobby=0A
+  try {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get('spectate') === '1' && q.get('lobby')) {
+      const lobby = q.get('lobby');
+      const m = q.get('mode') || 'sandbox';
+      menu.showLobby(m);
+      net.startLobbyPoll(m);
+      net.connectSpectate(m, lobby);
+      setStatus(`Spectating ${lobby}…`);
+      history.replaceState({}, '', window.location.pathname);
+    } else if (net.playAllowed) {
+      const mode = q.get('mode');
+      if (mode && ['sandbox', '1v1', '4v4'].includes(mode)) {
+        menu.showLobby(mode);
+        net.startLobbyPoll(mode);
+        history.replaceState({}, '', window.location.pathname);
+      }
+    }
+  } catch (err) {
+    console.warn(err);
+  }
 }
 
 function fitCharacterModel(model) {

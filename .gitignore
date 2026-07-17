@@ -5,3 +5,4 @@ temp-dont-use-directly/
 .env
 ref/
 server/.venv/
+.space_build/

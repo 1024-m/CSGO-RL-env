@@ -145,6 +145,7 @@ async def api_config():
     space = _game_server_url()
     return {
         "ok": True,
+        # WS match host (Space when up). Lobby HTTP stays same-origin (we proxy).
         "spaceUrl": space,
         "username": username,
         "avatarUrl": _avatar_url() if username else None,
@@ -152,6 +153,8 @@ async def api_config():
         "hasToken": bool(HF_TOKEN),
         "hasSpaceUrl": True,
         "lobbyHost": "hf" if space else "local",
+        "host": "local",
+        "playAllowed": True,
     }
 
 
@@ -160,25 +163,77 @@ async def api_health():
     return {"ok": True, "host": "local"}
 
 
+def _space_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+
 @app.get("/api/lobbies")
 async def api_lobbies():
+    if _space_ready():
+        try:
+            resp = httpx.get(f"{HF_SPACE_URL}/api/lobbies", timeout=8.0)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
     return board.snapshot()
 
 
 @app.post("/api/lobbies/{mode}/{lobby_id}/claim")
 async def api_claim(mode: str, lobby_id: str, body: ClaimBody):
-    result = board.claim(mode, lobby_id, body.username, body.seat)
+    username, err = _resolve_username()
+    if not username:
+        return JSONResponse({"ok": False, "error": err or "HF login required"}, status_code=401)
+    if _space_ready():
+        try:
+            resp = httpx.post(
+                f"{HF_SPACE_URL}/api/lobbies/{mode}/{lobby_id}/claim",
+                headers={**_space_headers(), "Content-Type": "application/json"},
+                json={"username": username, "seat": body.seat},
+                timeout=15.0,
+            )
+            data = resp.json()
+            return JSONResponse(data, status_code=resp.status_code)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": f"Space claim failed: {exc}"}, status_code=502)
+    result = board.claim(mode, lobby_id, username, body.seat)
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
 
 @app.post("/api/lobbies/leave")
 async def api_leave(body: LeaveBody):
-    return board.leave(body.username)
+    username, _err = _resolve_username()
+    user = username or body.username
+    if _space_ready() and user:
+        try:
+            httpx.post(
+                f"{HF_SPACE_URL}/api/lobbies/leave",
+                headers={**_space_headers(), "Content-Type": "application/json"},
+                json={"username": user},
+                timeout=10.0,
+            )
+        except Exception:
+            pass
+        return {"ok": True}
+    return board.leave(user)
 
 
 @app.post("/api/lobbies/heartbeat")
 async def api_heartbeat(body: HeartbeatBody):
-    board.heartbeat(body.username)
+    username, _err = _resolve_username()
+    user = username or body.username
+    if _space_ready() and user:
+        try:
+            httpx.post(
+                f"{HF_SPACE_URL}/api/lobbies/heartbeat",
+                headers={**_space_headers(), "Content-Type": "application/json"},
+                json={"username": user},
+                timeout=8.0,
+            )
+        except Exception:
+            pass
+        return {"ok": True}
+    board.heartbeat(user)
     return {"ok": True}
 
 
@@ -198,7 +253,11 @@ async def static_files(path: str = ""):
             target = ROOT / "index.html"
         else:
             raise HTTPException(404, "Not found")
-    return FileResponse(target)
+    # Bust sticky browser caches for local JS/CSS during iteration
+    headers = {}
+    if target.suffix in {".js", ".css", ".html"}:
+        headers["Cache-Control"] = "no-cache, must-revalidate"
+    return FileResponse(target, headers=headers)
 
 
 def main() -> None:

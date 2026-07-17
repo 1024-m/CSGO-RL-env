@@ -24,6 +24,7 @@ export class GameMenu {
     this.username = null;
     this.spaceUrl = null;
     this.authError = null;
+    this.playAllowed = true;
     this.selectedLobby = null;
 
     this.els = {
@@ -50,14 +51,29 @@ export class GameMenu {
     this.els.btnLeave?.addEventListener('click', () => this.onLeaveSeat?.());
   }
 
-  setIdentity({ username, spaceUrl, authError }) {
+  setIdentity({ username, spaceUrl, authError, playAllowed = true }) {
     this.username = username;
     this.spaceUrl = spaceUrl;
     this.authError = authError;
+    this.playAllowed = playAllowed !== false;
     if (this.els.userLabel) {
-      this.els.userLabel.textContent = username
-        ? `Signed in as ${username}`
-        : (authError || 'Not signed in — set HF_TOKEN in .env.local');
+      if (!username) {
+        this.els.userLabel.textContent = authError || 'Not signed in — set HF_TOKEN in .env.local';
+      } else if (!this.playAllowed) {
+        this.els.userLabel.textContent = `Spectator · ${username}`;
+      } else if (String(username).startsWith('guest-')) {
+        this.els.userLabel.textContent = `Guest · ${username}`;
+      } else {
+        this.els.userLabel.textContent = `Signed in as ${username}`;
+      }
+    }
+    if (this.els.btnEnter) this.els.btnEnter.hidden = !this.playAllowed;
+    if (this.els.btnLeave) this.els.btnLeave.hidden = !this.playAllowed;
+    const sub = this.root.querySelector('.menu-sub');
+    if (sub) {
+      sub.textContent = this.playAllowed
+        ? 'Sandbox · 1v1 · 4v4'
+        : 'Spectate only — play via local client';
     }
   }
 
@@ -100,6 +116,13 @@ export class GameMenu {
       this._setError(this.authError || 'Set HF_TOKEN in .env.local');
       return;
     }
+    if (!this.playAllowed) {
+      // Spectate-only host: still browse lobbies to pick Spectate.
+      this._setError('');
+      this.showLobby(mode);
+      this.onOpenMode?.(mode);
+      return;
+    }
     this._setError('');
     this.showLobby(mode);
     this.onOpenMode?.(mode);
@@ -128,20 +151,27 @@ export class GameMenu {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `seat-btn ${meta.cls}${user ? ' filled' : ''}`.trim();
-    btn.disabled = !!user || lobby.status === 'live' || lobby.status === 'starting';
+    const locked =
+      !this.playAllowed ||
+      !!user ||
+      lobby.status === 'live' ||
+      lobby.status === 'starting';
+    btn.disabled = locked;
     btn.title = seat; // internal id (X-1, Y-2, …)
     btn.innerHTML = user
       ? `${meta.label}<span class="seat-who">${user}</span>`
       : meta.label;
-    btn.addEventListener('click', async () => {
-      try {
-        this._setError('');
-        await this.onClaim?.(mode, lobby.id, seat);
-        this.selectedLobby = lobby.id;
-      } catch (err) {
-        this._setError(err.message || String(err));
-      }
-    });
+    if (this.playAllowed) {
+      btn.addEventListener('click', async () => {
+        try {
+          this._setError('');
+          await this.onClaim?.(mode, lobby.id, seat);
+          this.selectedLobby = lobby.id;
+        } catch (err) {
+          this._setError(err.message || String(err));
+        }
+      });
+    }
     return btn;
   }
 
@@ -235,12 +265,19 @@ export class GameMenu {
     }
 
     if (this.els.lobbyMeta) {
-      this.els.lobbyMeta.textContent =
-        mode === '1v1'
-          ? 'Red vs blue — match starts when both sides have a player. Spectate is read-only.'
-          : mode === '4v4'
-            ? 'Red (left) vs blue (right). Starts when full, or after 60s idle with ≥1 per side.'
-            : 'Sandbox starts when you join. Spectate watches a live lobby without taking a seat.';
+      if (!this.playAllowed) {
+        this.els.lobbyMeta.textContent =
+          'Spectate only — click Spectate on a live lobby. No HF login required.';
+      } else if (mode === '1v1') {
+        this.els.lobbyMeta.textContent =
+          'Red vs blue — match starts when both sides have a player. Spectate is read-only.';
+      } else if (mode === '4v4') {
+        this.els.lobbyMeta.textContent =
+          'Red (left) vs blue (right). Starts when full, or after 60s idle with ≥1 per side.';
+      } else {
+        this.els.lobbyMeta.textContent =
+          'Sandbox starts when you join. Spectate watches a live lobby without taking a seat.';
+      }
     }
   }
 }

@@ -1,17 +1,29 @@
-"""HF Space entry: FastAPI lobby/WS (Docker Space — sole uvicorn on :7860)."""
+"""HF Space: FastAPI lobbies/WS + full Dust2 game client (www/)."""
 
 from __future__ import annotations
 
+import mimetypes
 import os
+import re
+import secrets
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket
+import httpx
+from fastapi import Cookie, FastAPI, Header, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from lobbies import board
 from relay import handle_match_ws
+
+WWW = Path(__file__).resolve().parent / "www"
+_GUEST_RE = re.compile(r"^[A-Za-z0-9_-]{2,32}$")
+
+mimetypes.add_type("model/gltf-binary", ".glb")
+mimetypes.add_type("model/gltf+json", ".gltf")
 
 
 class ClaimBody(BaseModel):
@@ -36,7 +48,6 @@ BOARD_HTML = """<!doctype html>
   <style>
     :root {
       --bg0: #0c0a08;
-      --bg1: #161210;
       --line: #3a322a;
       --text: #ece6df;
       --muted: #9a9086;
@@ -66,7 +77,7 @@ BOARD_HTML = """<!doctype html>
       text-transform: uppercase;
       font-weight: 800;
     }
-    .lead { color: var(--muted); margin: 0.6rem 0 1.25rem; max-width: 40rem; line-height: 1.45; }
+    .lead { color: var(--muted); margin: 0.6rem 0 1.25rem; max-width: 42rem; line-height: 1.45; }
     .banner {
       border: 1px solid var(--line);
       background: rgba(12, 10, 8, 0.85);
@@ -75,8 +86,8 @@ BOARD_HTML = """<!doctype html>
       line-height: 1.45;
     }
     .banner strong { color: #fff; }
-    .tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-    .tab {
+    .nav { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .tab, .play {
       border: 2px solid #5a5048;
       background: transparent;
       color: var(--text);
@@ -85,8 +96,11 @@ BOARD_HTML = """<!doctype html>
       letter-spacing: 0.04em;
       cursor: pointer;
       font-size: 0.85rem;
+      text-decoration: none;
+      display: inline-block;
     }
     .tab.active { border-color: var(--accent); background: #1a1510; }
+    .play { border-color: #5dce8a; color: #b8f0d0; }
     .list { display: flex; flex-direction: column; gap: 0.65rem; }
     .card {
       border: 1px solid var(--line);
@@ -103,14 +117,8 @@ BOARD_HTML = """<!doctype html>
       justify-content: space-between;
       align-items: center;
       gap: 0.75rem;
-      margin-top: 0.15rem;
     }
-    .team {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.35rem;
-      max-width: 46%;
-    }
+    .team { display: flex; flex-wrap: wrap; gap: 0.35rem; max-width: 46%; }
     .team.x { justify-content: flex-start; }
     .team.y { justify-content: flex-end; }
     .seat {
@@ -125,10 +133,22 @@ BOARD_HTML = """<!doctype html>
     }
     .seat.team-x { border-color: var(--team-x); background: var(--team-x-bg); color: #ffd4ce; }
     .seat.team-y { border-color: var(--team-y); background: var(--team-y-bg); color: #cfe4ff; }
-    .seat.filled { opacity: 0.9; }
     .seat .who { display: block; font-size: 0.62rem; font-weight: 500; opacity: 0.85; }
     .seats-flat { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .hint { margin-top: 0.55rem; font-size: 0.78rem; color: var(--muted); }
+    .actions { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    a.spec-btn {
+      display: inline-block;
+      text-decoration: none;
+      border: 1px solid #5dce8a;
+      background: #142018;
+      color: #b8f0d0;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.4rem 0.75rem;
+    }
     .err { color: #ff8e8e; }
     footer { margin-top: 1.5rem; color: var(--muted); font-size: 0.8rem; }
     code { color: #d2b48c; }
@@ -137,20 +157,19 @@ BOARD_HTML = """<!doctype html>
 <body>
   <div class="wrap">
     <h1>Dust2 · RL-PVP</h1>
-    <p class="lead">Public match server. This page is the live lobby board — not the game.</p>
+    <p class="lead">Public lobby board + spectate. Playing requires the local client with HF login (for identity / analytics).</p>
     <div class="banner">
-      <strong>Play / spectate:</strong> run Dust2 Explorer locally
-      (<code>bash start.sh</code> → <code>http://localhost:8080</code>),
-      pick Sandbox / 1v1 / 4v4, claim a seat to play, or hit <strong>Spectate</strong> on a live lobby.
+      <strong>Spectate (no HF account):</strong> click <em>Spectate</em> on a live lobby.
+      <br/><strong>Play:</strong> run Dust2 locally (<code>bash start.sh</code>) with <code>HF_TOKEN</code> — not via this Space.
       <br/>Red = side X · Blue = side Y (labels are seat numbers only).
     </div>
-    <div class="tabs">
+    <div class="nav">
       <button type="button" class="tab active" data-mode="sandbox">Sandbox</button>
       <button type="button" class="tab" data-mode="1v1">1v1</button>
       <button type="button" class="tab" data-mode="4v4">4v4</button>
     </div>
     <div id="list" class="list">Loading lobbies…</div>
-    <footer>Auto-refreshes every 2s · <code>/api/lobbies</code> · <code>/api/health</code></footer>
+    <footer>Auto-refreshes every 2s · <code>/api/lobbies</code></footer>
   </div>
   <script>
     const KEY = { sandbox: 'sandbox', '1v1': 'duel', '4v4': 'squad' };
@@ -202,9 +221,14 @@ BOARD_HTML = """<!doctype html>
         const st = L.status === 'live' || L.status === 'starting'
           ? `<span class="live">${L.status}</span>`
           : `<span class="open">${L.status}</span>`;
-        const spec = (L.status === 'live' || L.status === 'starting')
-          ? '<div class="hint">Live — open the local game → this mode → Spectate on this lobby.</div>'
-          : '<div class="hint">Open — claim a seat in the local game to play.</div>';
+        const live = L.status === 'live' || L.status === 'starting';
+        const href = `/?spectate=1&mode=${encodeURIComponent(mode)}&lobby=${encodeURIComponent(L.id)}`;
+        const spec = live
+          ? `<div class="actions">
+               <a class="spec-btn" href="${href}">Spectate</a>
+               <div class="hint">Read-only viewer — no HF login required.</div>
+             </div>`
+          : `<div class="hint">Open — players join from the local client (HF login).</div>`;
         return `<div class="card">
           <div class="head">
             <span class="id">${L.id}</span>
@@ -233,6 +257,44 @@ BOARD_HTML = """<!doctype html>
 """
 
 
+def _ensure_guest(response: Response, dust2_user: str | None) -> str:
+    name = (dust2_user or "").strip()
+    if not name or not _GUEST_RE.fullmatch(name):
+        name = f"guest-{secrets.token_hex(3)}"
+        response.set_cookie(
+            key="dust2_user",
+            value=name,
+            max_age=60 * 60 * 24 * 30,
+            httponly=False,
+            samesite="lax",
+        )
+    return name
+
+
+def _hf_username_from_auth(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    if not token:
+        return None
+    try:
+        resp = httpx.get(
+            "https://huggingface.co/api/whoami-v2",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        name = data.get("name") or data.get("fullname")
+        return str(name) if name else None
+    except Exception:
+        return None
+
+
 def create_app() -> FastAPI:
     api = FastAPI()
     api.add_middleware(
@@ -243,30 +305,69 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    @api.get("/", response_class=HTMLResponse)
-    def home():
-        return BOARD_HTML
-
     @api.get("/api/health")
     def health():
-        return {"ok": True}
+        return {"ok": True, "host": "space", "hasClient": WWW.is_dir(), "playAllowed": False}
+
+    @api.get("/api/config")
+    def config(response: Response, dust2_user: str | None = Cookie(default=None)):
+        # Guest id is for spectate only — Space never allows play.
+        username = _ensure_guest(response, dust2_user)
+        return {
+            "ok": True,
+            "spaceUrl": "",
+            "username": username,
+            "avatarUrl": None,
+            "authError": None,
+            "hasToken": False,
+            "hasSpaceUrl": False,
+            "lobbyHost": "space",
+            "host": "space",
+            "playAllowed": False,
+        }
 
     @api.get("/api/lobbies")
     def get_lobbies():
         return board.snapshot()
 
     @api.post("/api/lobbies/{mode}/{lobby_id}/claim")
-    def claim_seat(mode: str, lobby_id: str, body: ClaimBody):
-        result = board.claim(mode, lobby_id, body.username, body.seat)
+    def claim_seat(
+        mode: str,
+        lobby_id: str,
+        body: ClaimBody,
+        authorization: str | None = Header(default=None),
+    ):
+        # Play only via local client proxy with a real HF token (analytics identity).
+        hf_user = _hf_username_from_auth(authorization)
+        if not hf_user:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Play disabled on Space. Use local Dust2 with HF_TOKEN.",
+                },
+                status_code=403,
+            )
+        result = board.claim(mode, lobby_id, hf_user, body.seat)
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
     @api.post("/api/lobbies/leave")
-    def leave_lobby(body: LeaveBody):
-        return board.leave(body.username)
+    def leave_lobby(body: LeaveBody, authorization: str | None = Header(default=None)):
+        hf_user = _hf_username_from_auth(authorization)
+        # Allow leave for HF-auth players; ignore anonymous spoof leave of others
+        if hf_user:
+            return board.leave(hf_user)
+        if body.username and not str(body.username).startswith("guest-"):
+            # Unauthenticated leave of a real seat — reject
+            return JSONResponse({"ok": False, "error": "HF auth required"}, status_code=403)
+        return {"ok": True}
 
     @api.post("/api/lobbies/heartbeat")
-    def heartbeat(body: HeartbeatBody):
-        board.heartbeat(body.username)
+    def heartbeat(body: HeartbeatBody, authorization: str | None = Header(default=None)):
+        hf_user = _hf_username_from_auth(authorization)
+        if hf_user:
+            board.heartbeat(hf_user)
+        elif body.username and not str(body.username).startswith("guest-"):
+            return JSONResponse({"ok": False, "error": "HF auth required"}, status_code=403)
         return {"ok": True}
 
     @api.websocket("/ws/match/{mode}/{lobby_id}")
@@ -277,7 +378,33 @@ def create_app() -> FastAPI:
         user: str = "",
         role: str = "play",
     ):
+        # Spectate: open to anyone. Play WS only works if already seated
+        # (seat claim requires HF token from the local client proxy).
         await handle_match_ws(ws, mode, lobby_id, user, role=role)
+
+    @api.get("/board", response_class=HTMLResponse)
+    def lobby_board():
+        return BOARD_HTML
+
+    @api.get("/")
+    def game_index(request: Request):
+        # Game client on Space is spectate-entry only.
+        q = request.query_params
+        if q.get("spectate") == "1" and q.get("lobby"):
+            index = WWW / "index.html"
+            if not index.is_file():
+                return HTMLResponse(
+                    "<h1>Game client missing</h1><p>Rebuild Space with www/.</p>",
+                    status_code=503,
+                )
+            return FileResponse(index)
+        return RedirectResponse(url="/board", status_code=302)
+
+    if WWW.is_dir():
+        for mount, folder in (("assets", "assets"), ("js", "js"), ("css", "css")):
+            path = WWW / folder
+            if path.is_dir():
+                api.mount(f"/{mount}", StaticFiles(directory=str(path)), name=mount)
 
     return api
 

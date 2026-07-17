@@ -8,11 +8,13 @@ app_port: 7860
 pinned: false
 ---
 
-Public **match server** for Dust2 Explorer (not the game client).
+# Dust2 · RL-PVP
 
-Play / spectate from the local game (`bash start.sh` → `http://localhost:8080`).
-This Space page is the live lobby board.
+Public **match server** + lobby board + **spectate** (no HF login).
 
-- Health: `/api/health`
-- Lobbies: `/api/lobbies`
-- Match WS: `/ws/match/{mode}/{lobby_id}?user=...&role=play|spectate`
+- **Board / status:** [`/board`](./board)
+- **Spectate:** Spectate button on a live lobby (no account)
+- **Play:** local Dust2 only (`bash start.sh` + `HF_TOKEN`) — Space rejects anonymous seat claims
+
+APIs: `/api/health`, `/api/lobbies`, `/api/config`  
+Match WS: `/ws/match/{mode}/{lobby_id}?user=...&role=play|spectate`
