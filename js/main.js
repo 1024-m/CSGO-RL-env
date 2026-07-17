@@ -5,7 +5,7 @@ import { InteractableManager } from './interactables.js';
 import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT } from './collision.js';
 import { WeatherSystem } from './weather.js';
 import { Minimap, collectMapMeshes } from './minimap.js?v=10';
-import { WeaponSystem } from './weapons.js?v=13';
+import { WeaponSystem } from './weapons.js?v=17';
 import { GameMenu } from './ui-menu.js';
 import { NetClient, SPAWN_OFFSETS } from './net.js';
 
@@ -581,7 +581,7 @@ function animate() {
 
     if (weapons) {
       if (scoping && !weapons.canScope()) setScoping(false);
-      weapons.update(delta, player, worldAimDir, camera.position);
+      weapons.update(delta, player, worldAimDir, camera.position, camera);
     }
 
     net.update(delta, player, weapons?.currentId || 'machinegun');

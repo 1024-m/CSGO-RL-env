@@ -330,6 +330,226 @@ class FlameCone {
   }
 }
 
+const SMOKE_PARTICLES = 220;
+/** Keep emitting through expand+hold; last 1s only existing wisps fade. */
+const SMOKE_EMIT_SEC = SMOKE_EXPAND_SEC + SMOKE_HOLD_SEC;
+const SMOKE_PUFF_LIFE = 3.2;
+
+function createSmokeTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, size, size);
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(195, 198, 202, 0.55)');
+  g.addColorStop(0.35, 'rgba(170, 174, 178, 0.3)');
+  g.addColorStop(0.7, 'rgba(130, 134, 138, 0.1)');
+  g.addColorStop(1, 'rgba(100, 100, 100, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
+ * World-space billboard quads (NOT gl.POINTS).
+ * Points hit GPU max point-size — scoped FOV makes enemies grow but points clamp,
+ * so smoke looked tiny when ADS. Quads scale with the camera like real geometry.
+ */
+class SmokeCloud {
+  constructor(scene, origin, radius) {
+    this.scene = scene;
+    this.origin = origin.clone();
+    this.origin.y += 0.15;
+    this.radius = radius;
+    this.age = 0;
+    this.emitAcc = 0;
+    this._cam = null;
+
+    const n = SMOKE_PARTICLES;
+    this.px = new Float32Array(n);
+    this.py = new Float32Array(n);
+    this.pz = new Float32Array(n);
+    this.vx = new Float32Array(n);
+    this.vy = new Float32Array(n);
+    this.vz = new Float32Array(n);
+    this.life = new Float32Array(n);
+    this.maxLife = new Float32Array(n);
+    this.baseSize = new Float32Array(n);
+    this.alive = new Uint8Array(n);
+
+    for (let i = 0; i < n; i += 1) {
+      this.alive[i] = 0;
+      this.py[i] = -999;
+    }
+
+    const geo = new THREE.PlaneGeometry(1, 1);
+    this.material = new THREE.MeshBasicMaterial({
+      map: createSmokeTexture(),
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
+      opacity: 1,
+    });
+    this.mesh = new THREE.InstancedMesh(geo, this.material, n);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 3;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Start all instances hidden
+    const hide = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < n; i += 1) this.mesh.setMatrixAt(i, hide);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    scene.add(this.mesh);
+
+    this._dummy = new THREE.Object3D();
+    this._hideMat = hide;
+
+    for (let i = 0; i < 70; i += 1) this._spawnPuff(0.15 + Math.random() * 0.35);
+  }
+
+  setCamera(camera) {
+    this._cam = camera || null;
+  }
+
+  _spawnPuff(speedScale = 1) {
+    let slot = -1;
+    for (let i = 0; i < SMOKE_PARTICLES; i += 1) {
+      if (!this.alive[i]) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0) {
+      let oldest = 0;
+      let best = -1;
+      for (let i = 0; i < SMOKE_PARTICLES; i += 1) {
+        if (this.life[i] > best) {
+          best = this.life[i];
+          oldest = i;
+        }
+      }
+      slot = oldest;
+    }
+
+    const jitter = 0.14;
+    this.px[slot] = this.origin.x + (Math.random() - 0.5) * jitter;
+    this.py[slot] = this.origin.y + Math.random() * 0.12;
+    this.pz[slot] = this.origin.z + (Math.random() - 0.5) * jitter;
+
+    const ang = Math.random() * Math.PI * 2;
+    const out = (0.35 + Math.random() * 0.85) * speedScale;
+    const up = (0.25 + Math.random() * 0.55) * speedScale;
+    this.vx[slot] = Math.cos(ang) * out;
+    this.vy[slot] = up;
+    this.vz[slot] = Math.sin(ang) * out;
+
+    this.life[slot] = 0;
+    this.maxLife[slot] = SMOKE_PUFF_LIFE * (0.75 + Math.random() * 0.5);
+    this.baseSize[slot] = 1.1 + Math.random() * 1.6; // meters — scales with FOV
+    this.alive[slot] = 1;
+  }
+
+  /** @returns {boolean} false when finished and disposed */
+  update(delta, camera = null) {
+    if (camera) this._cam = camera;
+    this.age += delta;
+    if (this.age >= SMOKE_TOTAL_SEC) {
+      this.dispose();
+      return false;
+    }
+
+    const emitting = this.age < SMOKE_EMIT_SEC;
+    let emitRate = 0;
+    if (this.age < SMOKE_EXPAND_SEC) {
+      emitRate = 70 * (this.age / SMOKE_EXPAND_SEC);
+    } else if (emitting) {
+      emitRate = 85;
+    }
+
+    if (emitRate > 0) {
+      this.emitAcc += emitRate * delta;
+      while (this.emitAcc >= 1) {
+        this.emitAcc -= 1;
+        this._spawnPuff(0.7 + Math.random() * 0.5);
+      }
+    }
+
+    let globalFade = 1;
+    if (this.age > SMOKE_EMIT_SEC) {
+      globalFade = 1 - (this.age - SMOKE_EMIT_SEC) / SMOKE_SHRINK_SEC;
+    } else if (this.age < SMOKE_EXPAND_SEC) {
+      globalFade = 0.4 + 0.6 * (this.age / SMOKE_EXPAND_SEC);
+    }
+    this.material.opacity = Math.max(0, globalFade);
+
+    const drag = Math.pow(0.92, delta * 60);
+    let anyAlive = false;
+    const cam = this._cam;
+
+    for (let i = 0; i < SMOKE_PARTICLES; i += 1) {
+      if (!this.alive[i]) {
+        this.mesh.setMatrixAt(i, this._hideMat);
+        continue;
+      }
+      anyAlive = true;
+
+      this.life[i] += delta / this.maxLife[i];
+      this.vy[i] += 0.15 * delta;
+      this.vx[i] *= drag;
+      this.vy[i] *= drag;
+      this.vz[i] *= drag;
+      this.px[i] += this.vx[i] * delta;
+      this.py[i] += this.vy[i] * delta;
+      this.pz[i] += this.vz[i] * delta;
+
+      const dx = this.px[i] - this.origin.x;
+      const dy = this.py[i] - this.origin.y;
+      const dz = this.pz[i] - this.origin.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > this.radius * 0.92) this.life[i] += delta * 0.55;
+
+      if (this.life[i] >= 1) {
+        this.alive[i] = 0;
+        this.py[i] = -999;
+        this.life[i] = 0;
+        this.mesh.setMatrixAt(i, this._hideMat);
+        continue;
+      }
+
+      const fadeIn = Math.min(1, this.life[i] / 0.12);
+      const fadeOut = 1 - Math.max(0, (this.life[i] - 0.45) / 0.55);
+      const grow = 0.55 + 1.85 * this.life[i];
+      const s = this.baseSize[i] * grow * Math.max(0.05, fadeIn * fadeOut);
+
+      this._dummy.position.set(this.px[i], this.py[i], this.pz[i]);
+      if (cam) this._dummy.quaternion.copy(cam.quaternion);
+      this._dummy.scale.set(s, s, s);
+      this._dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, this._dummy.matrix);
+    }
+
+    this.mesh.instanceMatrix.needsUpdate = true;
+
+    if (!emitting && !anyAlive) {
+      this.dispose();
+      return false;
+    }
+    return true;
+  }
+
+  dispose() {
+    this.scene.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    this.material.map?.dispose();
+    this.material.dispose();
+  }
+}
+
 export class WeaponSystem {
   constructor(scene, character, domElement) {
     this.scene = scene;
@@ -1171,40 +1391,9 @@ export class WeaponSystem {
     });
   }
 
-  _spawnSmokeCloud(pos, fromRemote = false) {
-    const group = new THREE.Group();
-    group.position.copy(pos);
-    group.position.y += 0.35;
-
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xb8bcc0,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 20), mat);
-    sphere.scale.setScalar(0.05);
-    group.add(sphere);
-
-    // Soft outer shell for volume
-    const mat2 = mat.clone();
-    mat2.opacity = 0;
-    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 16), mat2);
-    shell.scale.setScalar(0.05);
-    group.add(shell);
-
-    this.scene.add(group);
-    this.liveSmokes.push({
-      group,
-      sphere,
-      shell,
-      mat,
-      mat2,
-      age: 0,
-      radius: SMOKE_RADIUS,
-      fromRemote,
-    });
+  _spawnSmokeCloud(pos, _fromRemote = false, radius = SMOKE_RADIUS) {
+    const origin = pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z);
+    this.liveSmokes.push(new SmokeCloud(this.scene, origin, radius));
 
     this._ensureAudio();
     try {
@@ -1219,46 +1408,14 @@ export class WeaponSystem {
     const p = Array.isArray(pos)
       ? new THREE.Vector3(pos[0], pos[1], pos[2])
       : pos.clone();
-    this._spawnSmokeCloud(p, true);
-    const last = this.liveSmokes[this.liveSmokes.length - 1];
-    if (last) last.radius = radius;
+    this._spawnSmokeCloud(p, true, radius);
   }
 
-  _updateSmokes(delta) {
+  _updateSmokes(delta, camera = null) {
     for (let i = this.liveSmokes.length - 1; i >= 0; i -= 1) {
-      const s = this.liveSmokes[i];
-      s.age += delta;
-      if (s.age >= SMOKE_TOTAL_SEC) {
-        this.scene.remove(s.group);
-        s.sphere.geometry.dispose();
-        s.shell.geometry.dispose();
-        s.mat.dispose();
-        s.mat2.dispose();
+      if (!this.liveSmokes[i].update(delta, camera)) {
         this.liveSmokes.splice(i, 1);
-        continue;
       }
-
-      let scale = 1;
-      let opacity = 0.55;
-      if (s.age < SMOKE_EXPAND_SEC) {
-        const t = s.age / SMOKE_EXPAND_SEC;
-        scale = t;
-        opacity = 0.55 * t;
-      } else if (s.age < SMOKE_EXPAND_SEC + SMOKE_HOLD_SEC) {
-        scale = 1;
-        opacity = 0.55;
-      } else {
-        const t = (s.age - SMOKE_EXPAND_SEC - SMOKE_HOLD_SEC) / SMOKE_SHRINK_SEC;
-        scale = 1;
-        opacity = 0.55 * (1 - t);
-      }
-
-      const r = s.radius * Math.max(0.05, scale);
-      s.sphere.scale.setScalar(r);
-      s.shell.scale.setScalar(r * 1.12);
-      s.mat.opacity = opacity;
-      s.mat2.opacity = opacity * 0.35;
-      s.group.rotation.y += delta * 0.15;
     }
   }
 
@@ -1356,9 +1513,10 @@ export class WeaponSystem {
     }
   }
 
-  update(delta, player, aimDir, cameraPos) {
+  update(delta, player, aimDir, cameraPos, camera = null) {
     if (!this.ready) return;
     this._playerRef = player || null;
+    this._camera = camera || this._camera || null;
 
     if (this.reloading) {
       this.reloadTimer -= delta;
@@ -1375,7 +1533,7 @@ export class WeaponSystem {
     }
     this.impacts.update(performance.now() * 0.001, delta);
     this._updateGrenades(delta);
-    this._updateSmokes(delta);
+    this._updateSmokes(delta, this._camera);
 
     if (this.paused) return;
 
