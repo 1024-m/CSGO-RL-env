@@ -1,13 +1,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { PlayerController } from './controls.js';
+import { PlayerController } from './controls.js?v=2';
 import { InteractableManager } from './interactables.js';
-import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT } from './collision.js';
+import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT } from './collision.js?v=4';
 import { WeatherSystem } from './weather.js';
 import { Minimap, collectMapMeshes } from './minimap.js?v=10';
 import { WeaponSystem } from './weapons.js?v=29';
 import { GameMenu } from './ui-menu.js?v=35';
-import { NetClient, SPAWN_OFFSETS } from './net.js?v=35';
+import { NetClient, SPAWN_OFFSETS } from './net.js?v=36';
 import { SpectatorController } from './spectator.js?v=35';
 
 const DAMAGE_VIGNETTE_SEC = 2;
@@ -163,6 +163,10 @@ function setStatus(text) {
 let bootComplete = false;
 let gameplayActive = false;
 let baseSpawn = new THREE.Vector3();
+/** Full map AABB — needed so spawn offsets can drop-to-ground at new XZ. */
+let mapBoundsBox = new THREE.Box3();
+/** Precomputed on-floor spawns (opposite corners etc). Index 0 = T-ish, 1 = CT-ish. */
+let spawnPoints = [];
 
 window.addEventListener('error', (event) => {
   console.error(event.error || event.message);
@@ -261,6 +265,10 @@ const net = new NetClient({
   },
   onLobbyUpdate: (board, mode, error = null) => {
     menu.renderBoard(board, mode, error);
+  },
+  onMatchConnectionLost: () => {
+    exitGameplayToMenu();
+    setStatus('Match connection lost — lobby seats were freed. Rejoin.');
   },
 });
 
@@ -472,14 +480,31 @@ function initWeapons() {
   if (ammoHud) ammoHud.textContent = weapons.getAmmoDisplay();
 }
 
+/** Drop-in height (meters) above floor before settle — same gravity path for every seat. */
+const SPAWN_DROP_METERS = 12;
+
 function applySpawn(spawnIndex) {
-  if (!player) return;
-  const off = SPAWN_OFFSETS[spawnIndex % SPAWN_OFFSETS.length];
-  player.setPosition(baseSpawn.x + off.x, baseSpawn.y, baseSpawn.z + off.z);
+  if (!player || !collisionWorld) return;
+  let x = baseSpawn.x;
+  let z = baseSpawn.z;
+  if (spawnPoints.length) {
+    const i = ((spawnIndex % spawnPoints.length) + spawnPoints.length) % spawnPoints.length;
+    x = spawnPoints[i].x;
+    z = spawnPoints[i].z;
+  }
+  // Everyone: start SPAWN_DROP_METERS above ground at this XZ, then land with drop sim.
+  const feet = collisionWorld.dropFromAbove(x, z, mapBoundsBox, SPAWN_DROP_METERS);
+  player.position.set(feet.x, feet.y, feet.z);
+  player.velocityY = 0;
+  player.onGround = true;
 }
 
 function enterGameplay(info) {
-  if (!player || !mapLoaded) return;
+  // Match can start before map/player boot finishes — wait instead of no-op (blank screen).
+  if (!player || !mapLoaded) {
+    requestAnimationFrame(() => enterGameplay(info));
+    return;
+  }
   const spectating = !!info.spectating || !net.playAllowed || net.host === 'space';
   net.spectating = spectating;
 
@@ -652,18 +677,26 @@ mapLoader.load(
       scene.add(mapRoot);
 
       const mapBox = new THREE.Box3().setFromObject(mapRoot);
+      mapBoundsBox.copy(mapBox);
       const collisionMeshes = setupMapCollision(mapRoot);
       collisionWorld = new CollisionWorld(collisionMeshes);
       collisionWorld.setBounds(mapBox);
       const spawn = dropSpawnFromCorner(mapRoot, collisionWorld);
       baseSpawn.set(spawn.x, spawn.y, spawn.z);
+      spawnPoints = collisionWorld.collectSpreadSpawns(mapBox, 8);
+      if (!spawnPoints.length) {
+        // Last resort: only keep corner drop if it passes interior clearance.
+        const safe = collisionWorld.tryValidFeet(spawn.x, spawn.z, mapBox);
+        spawnPoints = [safe || spawn.clone()];
+      }
+      baseSpawn.copy(spawnPoints[0]);
       mapHitMeshes = collectMapMeshes(mapRoot);
 
       setStatus('Building minimap…');
       minimap.bake(collectMapMeshes(mapRoot), mapBox);
 
       player = new PlayerController(renderer.domElement, collisionWorld);
-      player.setPosition(spawn.x, spawn.y, spawn.z);
+      player.setPosition(spawnPoints[0].x, spawnPoints[0].y, spawnPoints[0].z);
       // Do not enable until match / menu chooses play
 
       interactables = new InteractableManager(scene, mapRoot);

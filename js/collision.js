@@ -143,24 +143,203 @@ export class CollisionWorld {
   }
 
   dropToGround(x, z, box) {
-    const feet = new THREE.Vector3(x, box.max.y + DROP_HEIGHT, z);
-    const state = { velocityY: 0, onGround: false };
+    return this.dropFromAbove(x, z, box, DROP_HEIGHT);
+  }
 
-    for (let i = 0; i < 1000; i += 1) {
-      state.velocityY -= 28 * (1 / 60);
-      this.moveVertical(feet, state.velocityY, 1 / 60, state);
-      if (state.onGround) break;
+  /**
+   * Start `metersAbove` over the floor under (x,z) (or over map top if unknown),
+   * then run the same vertical settle as gameplay gravity until onGround.
+   * Spirals outward if that XZ is a pit/gap so someone still lands on real floor.
+   */
+  dropFromAbove(x, z, box, metersAbove = 12) {
+    const tryOne = (px, pz) => {
+      const groundY = this.findWalkableGroundY(px, pz, box.max.y + DROP_HEIGHT);
+      const startY = (groundY != null ? groundY : box.max.y) + metersAbove;
+      const feet = new THREE.Vector3(px, startY, pz);
+      const state = { velocityY: 0, onGround: false };
+
+      for (let i = 0; i < 2000; i += 1) {
+        state.velocityY -= 28 * (1 / 60);
+        this.moveVertical(feet, state.velocityY, 1 / 60, state);
+        if (state.onGround) break;
+        // Fell through the world — abort this XZ.
+        if (feet.y < box.min.y - 5) {
+          state.onGround = false;
+          break;
+        }
+      }
+
+      if (!state.onGround) {
+        const y = this.findWalkableGroundY(px, pz, box.max.y + DROP_HEIGHT);
+        if (y == null) return null;
+        feet.y = y;
+        state.onGround = true;
+      }
+
+      this.snapToGroundSkin(feet);
+      if (this.probeGround(feet) == null) return null;
+      if (this.intersectsWalls(feet)) return null;
+      return feet;
+    };
+
+    const direct = tryOne(x, z);
+    if (direct) return direct;
+
+    // Pit / gap under the pick — walk outward until a real landing.
+    for (let ring = 1; ring <= 14; ring += 1) {
+      const step = ring * 2.5;
+      const samples = [
+        [x + step, z],
+        [x - step, z],
+        [x, z + step],
+        [x, z - step],
+        [x + step, z + step],
+        [x - step, z + step],
+        [x + step, z - step],
+        [x - step, z - step],
+      ];
+      for (const [px, pz] of samples) {
+        const feet = tryOne(px, pz);
+        if (feet) return feet;
+      }
     }
 
-    if (!state.onGround) {
-      const y = this.findWalkableGroundY(x, z, box.max.y + DROP_HEIGHT);
-      feet.y = y ?? box.max.y;
-      state.onGround = true;
-    }
+    // Absolute last resort: known map drop candidates near box min corner.
+    return (
+      tryOne(box.min.x + SPAWN_INSET_X, box.min.z + SPAWN_INSET_Z)
+      || new THREE.Vector3(x, box.max.y, z)
+    );
+  }
 
-    this.snapToGroundSkin(feet);
-    this.clampToBounds(feet);
+  /**
+   * Min distance to a non-walkable surface (walls) around the body.
+   * Used to reject spawns hugging walls / outside-map shells.
+   */
+  wallClearance(feet, maxDist = 2.8) {
+    let minClear = maxDist;
+    const heights = [
+      feet.y + BODY_PROBE_MIN_Y,
+      feet.y + PLAYER_HEIGHT * 0.55,
+      feet.y + PLAYER_HEIGHT - PLAYER_RADIUS,
+    ];
+    for (const y of heights) {
+      for (const dir of HORIZONTAL_DIRS) {
+        this.origin.set(feet.x, y, feet.z);
+        this.raycaster.set(this.origin, dir);
+        this.raycaster.far = maxDist;
+        const hits = this.raycaster.intersectObjects(this.meshes, false);
+        let hitDist = maxDist;
+        for (const hit of hits) {
+          if (isWalkableHit(hit)) continue;
+          hitDist = hit.distance;
+          break;
+        }
+        minClear = Math.min(minClear, hitDist);
+      }
+    }
+    return minClear;
+  }
+
+  /**
+   * Strict spawn probe: walkable floor, open interior (not in/near walls), not void.
+   */
+  tryValidFeet(x, z, box, { minClearance = PLAYER_RADIUS + 0.85 } = {}) {
+    const y = this.findWalkableGroundY(x, z, box.max.y + DROP_HEIGHT);
+    if (y == null) return null;
+    const feet = new THREE.Vector3(x, y, z);
+    // Do NOT clamp toward AABB edges — those edges are often outside playable geometry.
+    if (this.bounds) {
+      if (
+        feet.x < this.bounds.minX + 1.5
+        || feet.x > this.bounds.maxX - 1.5
+        || feet.z < this.bounds.minZ + 1.5
+        || feet.z > this.bounds.maxZ - 1.5
+      ) {
+        return null;
+      }
+    }
+    if (this.intersectsWalls(feet)) return null;
+    if (this.probeGround(feet) == null) return null;
+    const clear = this.wallClearance(feet);
+    if (clear < minClearance) return null;
+    // Neighbor pads must also be walkable (rejects thin ledges / wall lips).
+    for (const dir of HORIZONTAL_DIRS) {
+      const nx = feet.x + dir.x * 0.55;
+      const nz = feet.z + dir.z * 0.55;
+      if (this.findWalkableGroundY(nx, nz, box.max.y + DROP_HEIGHT) == null) return null;
+    }
+    feet.clearance = clear;
     return feet;
+  }
+
+  /**
+   * Grid-scan for open interior floors only. Farthest-point among high-clearance
+   * candidates — never prefer raw AABB corners (those hug walls / out-of-map boxes).
+   */
+  collectSpreadSpawns(box, count = 8) {
+    const step = 2.75;
+    // Pull well inside the AABB — outer shell of Dust2 is walls / void / props.
+    const edge = 16;
+    const minX = (this.bounds?.minX ?? box.min.x) + edge;
+    const maxX = (this.bounds?.maxX ?? box.max.x) - edge;
+    const minZ = (this.bounds?.minZ ?? box.min.z) + edge;
+    const maxZ = (this.bounds?.maxZ ?? box.max.z) - edge;
+    if (minX >= maxX || minZ >= maxZ) return [];
+
+    const raw = [];
+    for (let x = minX; x <= maxX; x += step) {
+      for (let z = minZ; z <= maxZ; z += step) {
+        const feet = this.tryValidFeet(x, z, box);
+        if (feet) raw.push(feet);
+      }
+    }
+    if (!raw.length) {
+      // Relax clearance once if the map is tight.
+      for (let x = minX; x <= maxX; x += step) {
+        for (let z = minZ; z <= maxZ; z += step) {
+          const feet = this.tryValidFeet(x, z, box, { minClearance: PLAYER_RADIUS + 0.45 });
+          if (feet) raw.push(feet);
+        }
+      }
+    }
+    if (!raw.length) return [];
+
+    const ys = raw.map((p) => p.y).sort((a, b) => a - b);
+    const medianY = ys[Math.floor(ys.length / 2)];
+    let pool = raw.filter((p) => Math.abs(p.y - medianY) <= 3.5);
+    if (pool.length < count) pool = raw;
+
+    // Keep the open-est half so farthest-point can't run to wall-hugging extremes.
+    pool.sort((a, b) => (b.clearance ?? 0) - (a.clearance ?? 0));
+    const open = pool.slice(0, Math.max(count * 4, Math.ceil(pool.length * 0.45)));
+
+    // Seed with the most open point (interior), not a corner.
+    const picked = [open[0].clone()];
+    picked[0].clearance = open[0].clearance;
+    while (picked.length < count && picked.length < open.length) {
+      let best = null;
+      let bestScore = -1;
+      for (const c of open) {
+        let minD = Infinity;
+        for (const p of picked) {
+          const dx = c.x - p.x;
+          const dz = c.z - p.z;
+          minD = Math.min(minD, dx * dx + dz * dz);
+        }
+        // Clearance bonus so we don't pick a far-but-cramped alley.
+        const clear = c.clearance ?? 0;
+        const score = minD + clear * clear * 4;
+        if (score > bestScore) {
+          bestScore = score;
+          best = c;
+        }
+      }
+      if (!best || bestScore < 4) break;
+      const next = best.clone();
+      next.clearance = best.clearance;
+      picked.push(next);
+    }
+    return picked;
   }
 
   findWalkableGroundY(x, z, fromY) {

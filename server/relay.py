@@ -115,10 +115,19 @@ async def handle_match_ws(
     for _ in range(180):
         lobby = board.get(lobby_id)
         if lobby and not spectate:
+            # Keep seat alive while parked in the wait loop (HTTP HB can lag).
+            board.heartbeat(username)
             board._maybe_start(lobby)
             lobby = board.get(lobby_id)
+            # Seat was wiped (stale / leave) — stop waiting instead of crashing later.
+            if not board.by_user.get(username) or board.by_user.get(username)[0] != lobby_id:
+                await ws.send_text(json.dumps({"type": "error", "error": "seat lost — rejoin lobby"}))
+                await ws.close()
+                return
         if lobby and lobby.get("match_id") and lobby["status"] in ("starting", "live"):
-            break
+            # Only proceed if this player is still seated (or spectating).
+            if spectate or (board.by_user.get(username) and board.by_user[username][0] == lobby_id):
+                break
         if spectate and lobby and lobby["status"] == "open" and not lobby.get("match_id"):
             await ws.send_text(
                 json.dumps({"type": "waiting", "lobby": board._public(lobby), "spectating": True})
@@ -139,13 +148,25 @@ async def handle_match_ws(
         return
 
     lobby = board.get(lobby_id)
-    assert lobby and lobby["match_id"]
+    if not lobby or not lobby.get("match_id"):
+        await ws.send_text(json.dumps({"type": "error", "error": "lobby reset — rejoin"}))
+        await ws.close()
+        return
+
+    seat = None
+    if not spectate:
+        seat_info = board.by_user.get(username)
+        if not seat_info or seat_info[0] != lobby_id:
+            await ws.send_text(json.dumps({"type": "error", "error": "not seated in lobby"}))
+            await ws.close()
+            return
+        seat = seat_info[1]
+
     match_id = lobby["match_id"]
     room = await get_or_create_room(lobby_id, mode, match_id)
     await room.add(username, ws, spectate=spectate)
 
     players = board.players_in(lobby_id)
-    seat = None if spectate else board.by_user[username][1]
     start_payload = {
         "type": "match_start",
         "matchId": match_id,

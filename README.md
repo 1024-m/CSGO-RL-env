@@ -18,7 +18,11 @@ Or:
 Needs Python 3 installed and on PATH. macOS often has `python3` only (no `python`).
 
 ```bash
-# put your Hugging Face token here, then save
-# file: .env.local
+# copy .env.example → .env.local, then set your token
+# (.env.local is gitignored — clones do NOT get your secrets)
 HF_TOKEN=hf_xxxxxxxx
+HF_SPACE_URL=https://1024m-rl-pvp.hf.space
+PORT=8080
 ```
+
+**Online 1v1:** both players need `HF_SPACE_URL` pointing at the same Space. Token alone = each laptop runs its own local lobby; you will not see each other.

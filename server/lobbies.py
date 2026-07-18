@@ -104,8 +104,11 @@ class LobbyBoard:
         if lobby and lobby["seats"].get(seat) == username:
             lobby["seats"][seat] = None
             lobby.get("_avatars", {}).pop(username, None)
+            lobby.get("_hb", {}).pop(username, None)
             lobby["last_change"] = _now()
-            if lobby["status"] == "live" and not any(lobby["seats"].values()):
+            # Empty live/starting lobby must reset — otherwise match_id lingers
+            # and the next WS wait loop "starts" a ghost match with no players.
+            if lobby["status"] in ("live", "starting") and not any(lobby["seats"].values()):
                 self._reset_lobby(lobby)
 
     def _reset_lobby(self, lobby: dict[str, Any]) -> None:
@@ -138,8 +141,8 @@ class LobbyBoard:
             return {"ok": False, "error": "lobby not found"}
         if seat not in lobby["seats"]:
             return {"ok": False, "error": "invalid seat"}
-        if lobby["status"] == "live":
-            return {"ok": False, "error": "match already live"}
+        if lobby["status"] in ("live", "starting"):
+            return {"ok": False, "error": "match already starting"}
         if lobby["seats"][seat] is not None:
             return {"ok": False, "error": "seat taken"}
 
@@ -183,7 +186,9 @@ class LobbyBoard:
                 stale_users.append(username)
                 continue
             hb = lobby.get("_hb", {}).get(username, lobby["last_change"])
-            if now - hb > SEAT_STALE_SEC and lobby["status"] != "live":
+            # Protect both live AND starting — otherwise both seats get wiped
+            # in the window between "lobby full" and match_start / mark_live.
+            if now - hb > SEAT_STALE_SEC and lobby["status"] not in ("live", "starting"):
                 stale_users.append(username)
         for u in stale_users:
             self._clear_user(u)
