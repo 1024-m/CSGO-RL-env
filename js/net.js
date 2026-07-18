@@ -16,12 +16,13 @@ function wsUrl(spaceUrl, mode, lobbyId, username, role = 'play') {
 }
 
 export class NetClient {
-  constructor({ scene, onStatus, onMatchStart, onMatchEnd, onLobbyUpdate }) {
+  constructor({ scene, onStatus, onMatchStart, onMatchEnd, onLobbyUpdate, onMatchConnectionLost }) {
     this.scene = scene;
     this.onStatus = onStatus || (() => {});
     this.onMatchStart = onMatchStart || (() => {});
     this.onMatchEnd = onMatchEnd || (() => {});
     this.onLobbyUpdate = onLobbyUpdate || (() => {});
+    this.onMatchConnectionLost = onMatchConnectionLost || (() => {});
 
     this.username = null;
     this.avatarUrl = null;
@@ -216,9 +217,15 @@ export class NetClient {
     };
 
     ws.onclose = () => {
-      if (this.ws === ws) {
-        this.inMatch = false;
-        this.onStatus('Match connection closed');
+      if (this.ws !== ws) return;
+      const wasInMatch = this.inMatch;
+      const wasSpectating = this.spectating;
+      this.ws = null;
+      this.inMatch = false;
+      this.onStatus('Match connection closed');
+      // Don't leave the user on a black gameplay canvas with an empty lobby.
+      if (wasInMatch || wasSpectating) {
+        this.onMatchConnectionLost({ wasInMatch, wasSpectating });
       }
     };
 
@@ -228,17 +235,18 @@ export class NetClient {
   }
 
   disconnectMatch(clearGhosts = true) {
-    if (this.ws) {
+    const ws = this.ws;
+    this.ws = null; // prevent onclose from treating intentional close as a drop
+    this.inMatch = false;
+    this.matchId = null;
+    this.spectating = false;
+    if (ws) {
       try {
-        this.ws.close();
+        ws.close();
       } catch {
         // ignore
       }
     }
-    this.ws = null;
-    this.inMatch = false;
-    this.matchId = null;
-    this.spectating = false;
     if (clearGhosts) this.ghosts.clear();
   }
 
@@ -256,6 +264,14 @@ export class NetClient {
     }
     if (type === 'error') {
       this.onStatus(msg.error || 'Server error');
+      // Fatal seat/match errors — drop the socket so UI can recover.
+      if (/seat|seated|rejoin|lobby reset|match did not start/i.test(msg.error || '')) {
+        try {
+          this.ws?.close();
+        } catch {
+          // ignore
+        }
+      }
       return;
     }
     if (type === 'match_start') {
