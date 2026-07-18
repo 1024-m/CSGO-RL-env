@@ -73,7 +73,17 @@ export class GameMenu {
     if (sub) {
       sub.textContent = this.playAllowed
         ? 'Sandbox · 1v1 · 4v4'
-        : 'Spectate only — play via local client';
+        : 'Spectate only — no HF login · play is local-only';
+    }
+    // Space / spectate host: hide play mode buttons; lobbies are spectate pickers only.
+    for (const id of ['btn-mode-sandbox', 'btn-mode-1v1', 'btn-mode-4v4']) {
+      const btn = this.root.querySelector(`#${id}`);
+      if (btn) btn.hidden = !this.playAllowed;
+    }
+    if (!this.playAllowed && this.els.start) {
+      // Keep brand; modes hidden. Auto-open sandbox spectate list.
+      this.showLobby('sandbox');
+      this.onOpenMode?.('sandbox');
     }
   }
 

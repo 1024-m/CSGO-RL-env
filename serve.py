@@ -118,6 +118,7 @@ def _game_server_url() -> str:
 class ClaimBody(BaseModel):
     username: str = Field(..., min_length=1)
     seat: str = Field(..., min_length=1)
+    avatarUrl: str | None = None
 
 
 class LeaveBody(BaseModel):
@@ -189,14 +190,20 @@ async def api_claim(mode: str, lobby_id: str, body: ClaimBody):
             resp = httpx.post(
                 f"{HF_SPACE_URL}/api/lobbies/{mode}/{lobby_id}/claim",
                 headers={**_space_headers(), "Content-Type": "application/json"},
-                json={"username": username, "seat": body.seat},
+                json={
+                    "username": username,
+                    "seat": body.seat,
+                    "avatarUrl": _avatar_url() or body.avatarUrl,
+                },
                 timeout=15.0,
             )
             data = resp.json()
             return JSONResponse(data, status_code=resp.status_code)
         except Exception as exc:
             return JSONResponse({"ok": False, "error": f"Space claim failed: {exc}"}, status_code=502)
-    result = board.claim(mode, lobby_id, username, body.seat)
+    result = board.claim(
+        mode, lobby_id, username, body.seat, avatar_url=_avatar_url() or body.avatarUrl
+    )
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
 

@@ -289,6 +289,10 @@ kbd {
   pointer-events: none;
 }
 
+#hp-hud[hidden] {
+  display: none !important;
+}
+
 #hp-hud .hp-icon {
   width: 28px;
   height: 28px;
@@ -318,6 +322,72 @@ kbd {
 
 #hp-hud.dead .hp-icon {
   fill: #666;
+}
+
+/* Spectate identity — center, ~3/4 down the viewport */
+#spectate-bar {
+  position: absolute;
+  left: 50%;
+  top: 75%;
+  transform: translate(-50%, -50%);
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  pointer-events: auto;
+}
+
+#spectate-bar[hidden] {
+  display: none !important;
+}
+
+.spec-arrow {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 3px solid #fff;
+  background: #000;
+  color: #fff;
+  font-size: 1.45rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.65);
+}
+
+.spec-arrow:hover {
+  background: #1a1a1a;
+}
+
+.spec-arrow:active {
+  background: #333;
+}
+
+#spec-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: #222;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+#spec-name {
+  font-family: "Arial Black", "Helvetica Neue", Impact, sans-serif;
+  font-size: 1.15rem;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    1px 1px 0 #000,
+    -1px 1px 0 #000,
+    1px -1px 0 #000,
+    -1px -1px 0 #000;
+  min-width: 4rem;
+  text-align: center;
 }
 
 /* ── Start / lobby menus ─────────────────────────────────────────── */

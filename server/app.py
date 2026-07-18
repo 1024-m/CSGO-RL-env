@@ -29,6 +29,7 @@ mimetypes.add_type("model/gltf+json", ".gltf")
 class ClaimBody(BaseModel):
     username: str = Field(..., min_length=1)
     seat: str = Field(..., min_length=1)
+    avatarUrl: str | None = None
 
 
 class LeaveBody(BaseModel):
@@ -160,7 +161,8 @@ BOARD_HTML = """<!doctype html>
     <p class="lead">Public lobby board + spectate. Playing requires the local client with HF login (for identity / analytics).</p>
     <div class="banner">
       <strong>Spectate (no HF account):</strong> click <em>Spectate</em> on a live lobby.
-      <br/><strong>Play:</strong> run Dust2 locally (<code>bash start.sh</code>) with <code>HF_TOKEN</code> — not via this Space.
+      <br/>In spectate: <strong>← →</strong> switch player · <strong>Esc</strong> back. No movement, no weapons, no play.
+      <br/><strong>Play:</strong> local Dust2 only (<code>bash start.sh</code> + <code>HF_TOKEN</code>).
       <br/>Red = side X · Blue = side Y (labels are seat numbers only).
     </div>
     <div class="nav">
@@ -347,7 +349,9 @@ def create_app() -> FastAPI:
                 },
                 status_code=403,
             )
-        result = board.claim(mode, lobby_id, hf_user, body.seat)
+        result = board.claim(
+            mode, lobby_id, hf_user, body.seat, avatar_url=body.avatarUrl
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
     @api.post("/api/lobbies/leave")
@@ -378,8 +382,19 @@ def create_app() -> FastAPI:
         user: str = "",
         role: str = "play",
     ):
-        # Spectate: open to anyone. Play WS only works if already seated
-        # (seat claim requires HF token from the local client proxy).
+        spectate = (role or "").lower() in ("spectate", "spec", "watch")
+        # Browser on Space: spectate only. Play sockets are for seated HF players
+        # (local client claims with HF_TOKEN, then connects play WS).
+        if not spectate:
+            # Allow play only if this user already holds a seat (HF-authenticated claim).
+            seated = board.by_user.get((user or "").strip())
+            if not seated or seated[0] != lobby_id:
+                await ws.accept()
+                await ws.send_text(
+                    '{"type":"error","error":"Spectate only in browser. Play via local Dust2 + HF_TOKEN."}'
+                )
+                await ws.close()
+                return
         await handle_match_ws(ws, mode, lobby_id, user, role=role)
 
     @api.get("/board", response_class=HTMLResponse)

@@ -1,7 +1,7 @@
 import { GhostManager } from './ghosts.js';
 import { LocalCombat, damageFor, grenadeDamageAt, DAMAGE, inFlameCone, meleeHit } from './combat.js';
 
-const STATE_HZ = 20;
+const STATE_HZ = 45;
 const STATE_INTERVAL = 1 / STATE_HZ;
 const LOBBY_POLL_MS = 1000;
 const HEARTBEAT_MS = 3000;
@@ -58,15 +58,20 @@ export class NetClient {
     // spaceUrl = match WS host when Space is up. Lobby HTTP is always same-origin.
     this.spaceUrl = cfg.spaceUrl || '';
     this.username = cfg.username || null;
-    this.playAllowed = cfg.playAllowed !== false;
-    this.avatarUrl = cfg.avatarUrl || (this.username
+    this.host = cfg.host || 'local';
+    // Space is spectate-only. Never treat missing playAllowed as "allow".
+    this.playAllowed = cfg.host === 'space' ? false : cfg.playAllowed !== false;
+    this.avatarUrl = cfg.avatarUrl || (this.username && !String(this.username).startsWith('guest-')
       ? `https://huggingface.co/avatars/${encodeURIComponent(this.username)}`
       : null);
     if (!this.username) {
       return { ok: false, error: cfg.authError || 'No player identity' };
     }
-    // Local play needs HF_TOKEN. Space host is spectate-only (guest ok).
-    if (this.playAllowed && cfg.hasToken === false && cfg.host !== 'space') {
+    // Local play must be a real HF user — never a guest-* cookie identity.
+    if (this.host === 'local' && String(this.username).startsWith('guest-')) {
+      return { ok: false, error: 'Local play requires HF_TOKEN (guest ids are spectate-only on Space)' };
+    }
+    if (this.playAllowed && cfg.hasToken === false && this.host !== 'space') {
       return { ok: false, error: cfg.authError || 'Set HF_TOKEN in .env.local' };
     }
     return {
@@ -75,6 +80,7 @@ export class NetClient {
       avatarUrl: this.avatarUrl,
       spaceUrl: this.spaceUrl || window.location.origin,
       playAllowed: this.playAllowed,
+      host: this.host,
     };
   }
 
@@ -130,7 +136,11 @@ export class NetClient {
     const res = await fetch(`/api/lobbies/${encodeURIComponent(mode)}/${encodeURIComponent(lobbyId)}/claim`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: this.username, seat }),
+      body: JSON.stringify({
+        username: this.username,
+        seat,
+        avatarUrl: this.avatarUrl || null,
+      }),
     });
     let data;
     try {
@@ -161,7 +171,7 @@ export class NetClient {
   }
 
   connectMatch() {
-    if (!this.playAllowed) {
+    if (!this.playAllowed || this.host === 'space') {
       this.onStatus('Play disabled here — spectate only');
       return;
     }
@@ -176,10 +186,13 @@ export class NetClient {
     this.lobbyId = lobbyId;
     this.seat = null;
     this.side = 'ffa';
+    this.spectating = true;
     this._openMatchWs('spectate');
   }
 
   _openMatchWs(role) {
+    // Space host can never open a play socket from the browser.
+    if (this.host === 'space' || !this.playAllowed) role = 'spectate';
     this.disconnectMatch(false);
     this.spectating = role === 'spectate';
     const url = wsUrl(this.spaceUrl, this.mode, this.lobbyId, this.username, role);
@@ -249,7 +262,9 @@ export class NetClient {
       this.inMatch = true;
       this.matchId = msg.matchId;
       this.players = msg.players || [];
-      this.spectating = !!msg.spectating || this.spectating;
+      // Space / playAllowed=false is always spectate, even if server omits the flag.
+      this.spectating =
+        !!msg.spectating || this.spectating || !this.playAllowed || this.host === 'space';
       this.seat = this.spectating ? null : (msg.seat || this.seat);
       this.side = this.spectating ? 'ffa' : seatSide(this.seat);
       // Spectators see everyone (no self username to hide)
@@ -277,19 +292,30 @@ export class NetClient {
       this.ghosts.applyState(msg.from, msg);
       return;
     }
-    if (type === 'hit' && msg.target === this.username && !this.spectating) {
-      this.combat.applyDamage(msg.damage || 0, msg.from);
+    if (type === 'hit') {
+      if (msg.target === this.username && !this.spectating) {
+        this.combat.applyDamage(msg.damage || 0, msg.from);
+        return;
+      }
+      // Spectate: vignette when the followed player is hit (HP also arrives via state).
+      if (this.spectating && msg.target && this.onSpectateHit) {
+        this.onSpectateHit(msg);
+      }
       return;
     }
     if (type === 'fire' && msg.from && this.onRemoteFire) {
+      // Drop combat FX while that player is reloading (all weapons, not just flame).
+      if (this.ghosts.ghosts.get(msg.from)?.reloading) return;
       this.onRemoteFire(msg);
       return;
     }
     if (type === 'flame' && msg.from && this.onRemoteFlame) {
+      if (this.ghosts.ghosts.get(msg.from)?.reloading) return;
       this.onRemoteFlame(msg);
       return;
     }
     if (type === 'grenade_throw' && msg.from && this.onRemoteGrenadeThrow) {
+      if (this.ghosts.ghosts.get(msg.from)?.reloading) return;
       this.onRemoteGrenadeThrow(msg);
       return;
     }
@@ -298,6 +324,7 @@ export class NetClient {
       return;
     }
     if (type === 'melee' && msg.from && this.onRemoteMelee) {
+      if (this.ghosts.ghosts.get(msg.from)?.reloading) return;
       this.onRemoteMelee(msg);
       return;
     }
@@ -308,7 +335,7 @@ export class NetClient {
   }
 
   /** Call each frame while in match */
-  update(delta, player, weaponId) {
+  update(delta, player, weaponId, extras = {}) {
     if (!this.inMatch || !player) return;
     this.combat.update(performance.now() * 0.001);
     this.ghosts.update(delta);
@@ -319,8 +346,11 @@ export class NetClient {
       this._stateAcc = 0;
       const feet = player.position;
       this._lastPos = [feet.x, feet.y, feet.z];
-      this._lastRot = [player.cameraYaw, player.cameraPitch];
+      // [cameraYaw, cameraPitch, characterYaw] — body can diverge while strafing
+      this._lastRot = [player.cameraYaw, player.cameraPitch, player.characterYaw];
       this._weapon = weaponId;
+      const reloading = !!extras.reloading;
+      const firing = !reloading && !!extras.firing;
       this.send({
         type: 'state',
         pos: this._lastPos,
@@ -328,6 +358,12 @@ export class NetClient {
         hp: this.combat.hp,
         alive: this.combat.alive,
         weapon: weaponId,
+        ammo: extras.ammo || '',
+        scope: !!extras.scope,
+        reloading,
+        firing,
+        flame: firing && weaponId === 'flamethrower',
+        avatarUrl: this.avatarUrl || undefined,
         action: player.isMoving?.() ? 'move' : 'idle',
       });
     }
@@ -335,24 +371,23 @@ export class NetClient {
 
   // ── Combat helpers used by WeaponSystem ───────────────────────────
 
-  tryHitscan(weaponId, origin, dir) {
+  tryHitscan(weaponId, origin, dir, { scoped = false } = {}) {
     if (!this.inMatch || this.spectating || !this.combat.alive) return null;
     const hit = this.ghosts.raycast(origin, dir, 80);
-    if (!hit) {
-      this.send({
-        type: 'fire',
-        weapon: weaponId,
-        origin: [origin.x, origin.y, origin.z],
-        dir: [dir.x, dir.y, dir.z],
-      });
-      return null;
-    }
-    const dmg = damageFor(weaponId, hit.zone);
-    this.send({
+    const payload = {
       type: 'fire',
       weapon: weaponId,
       origin: [origin.x, origin.y, origin.z],
       dir: [dir.x, dir.y, dir.z],
+      scoped: !!scoped,
+    };
+    if (!hit) {
+      this.send(payload);
+      return null;
+    }
+    const dmg = damageFor(weaponId, hit.zone);
+    this.send({
+      ...payload,
       hitUser: hit.username,
       zone: hit.zone,
       damage: dmg,

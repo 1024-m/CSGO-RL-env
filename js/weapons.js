@@ -21,8 +21,10 @@ const FLAME_HALF_ANGLE = THREE.MathUtils.degToRad(18);
 const FLAME_PARTICLES = 220;
 
 const MACHINEGUN_FIRE_INTERVAL = 1 / 8;
-const SNIPER_FIRE_INTERVAL = 2;
-const SHOTGUN_FIRE_INTERVAL = SNIPER_FIRE_INTERVAL / 2;
+/** Base sniper 2s; +10% RoF → shorter interval. */
+const SNIPER_FIRE_INTERVAL = 2 / 1.1;
+/** Base shotgun was sniper/2 (=1s); +25% RoF. */
+const SHOTGUN_FIRE_INTERVAL = 1 / 1.25;
 const GRENADE_THROW_INTERVAL = 2;
 const GRENADE_FUSE = 2.5;
 const GRENADE_THROW_SPEED = 14;
@@ -187,8 +189,9 @@ function createFlameTexture() {
 }
 
 class FlameCone {
-  constructor(scene) {
+  constructor(scene, { remote = false } = {}) {
     this.scene = scene;
+    this.remote = !!remote;
     this.active = false;
     this.origin = new THREE.Vector3();
     this.forward = new THREE.Vector3(0, 0, 1);
@@ -213,20 +216,24 @@ class FlameCone {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.geometry = geometry;
 
+    // Remote/spectate: larger particles so the cone reads from the follow cam
+    // (exact look axis otherwise collapses to a glowing tip blob).
+    const pointSize = this.remote ? 0.72 : 0.55;
     this.points = new THREE.Points(
       geometry,
       new THREE.PointsMaterial({
         map: createFlameTexture(),
-        size: 0.55,
+        size: pointSize,
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         color: 0xffaa44,
         sizeAttenuation: true,
-        opacity: 0.95,
+        opacity: this.remote ? 1 : 0.95,
       }),
     );
     this.points.frustumCulled = false;
+    this.points.renderOrder = 3;
     this.points.visible = false;
     scene.add(this.points);
 
@@ -239,7 +246,7 @@ class FlameCone {
       new THREE.MeshBasicMaterial({
         color: 0xff6a18,
         transparent: true,
-        opacity: 0.18,
+        opacity: this.remote ? 0.1 : 0.18,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         side: THREE.DoubleSide,
@@ -248,13 +255,13 @@ class FlameCone {
     this.core.visible = false;
     scene.add(this.core);
 
-    const tipGeo = new THREE.SphereGeometry(0.22, 12, 12);
+    const tipGeo = new THREE.SphereGeometry(this.remote ? 0.12 : 0.22, 12, 12);
     this.tip = new THREE.Mesh(
       tipGeo,
       new THREE.MeshBasicMaterial({
         color: 0xffe08a,
         transparent: true,
-        opacity: 0.55,
+        opacity: this.remote ? 0.25 : 0.55,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -267,7 +274,8 @@ class FlameCone {
     this.active = on;
     this.points.visible = on;
     this.core.visible = on;
-    this.tip.visible = on;
+    // Tip reads as a fake yellow ball on the spectate look-axis — keep dim/off for remote.
+    this.tip.visible = on && !this.remote;
   }
 
   update(delta, origin, forward) {
@@ -314,8 +322,9 @@ class FlameCone {
     }
 
     this.geometry.attributes.position.needsUpdate = true;
-    this.points.material.size = 0.42 + 0.2 * pulse;
-    this.core.material.opacity = 0.12 + 0.1 * pulse;
+    const base = this.remote ? 0.58 : 0.42;
+    this.points.material.size = base + 0.22 * pulse;
+    this.core.material.opacity = (this.remote ? 0.08 : 0.12) + 0.08 * pulse;
   }
 
   dispose() {
@@ -622,6 +631,10 @@ export class WeaponSystem {
     this.audio = new WeaponAudio();
     this.impacts = new ImpactSystem(scene);
     this._flameWasFiring = false;
+    /** @type {Map<string, { cone: FlameCone, origin: THREE.Vector3, dir: THREE.Vector3, until: number }>} */
+    this.remoteFlames = new Map();
+    this._remoteMuzzleT = 0;
+    this.onArmsReady = null;
 
     this.tracers = [];
     this._tracerMat = new THREE.MeshBasicMaterial({
@@ -667,6 +680,7 @@ export class WeaponSystem {
         this._applyVisibility();
         this._loadMachinegunModel();
         this._loadSniperModel();
+        this.onArmsReady?.();
       }
     };
 
@@ -749,6 +763,7 @@ export class WeaponSystem {
         this.machinegunLoaded = true;
         this.machinegunLoading = false;
         this._applyVisibility();
+        this.onArmsReady?.();
       },
       undefined,
       (error) => {
@@ -780,6 +795,7 @@ export class WeaponSystem {
         this.sniperLoaded = true;
         this.sniperLoading = false;
         this._applyVisibility();
+        this.onArmsReady?.();
       },
       undefined,
       (error) => {
@@ -787,6 +803,202 @@ export class WeaponSystem {
         this.sniperLoading = false;
       },
     );
+  }
+
+  /** Cloned hand weapons for remote / spectate ghosts. */
+  createGhostArms() {
+    if (!this.ready) return null;
+    const root = new THREE.Group();
+    root.position.copy(HAND_POS);
+    const slots = {};
+    for (const id of WEAPON_IDS) {
+      const slot = this.slots[id].clone(true);
+      slot.visible = false;
+      root.add(slot);
+      slots[id] = slot;
+    }
+    let swingT = 0;
+    let swinging = false;
+    return {
+      root,
+      slots,
+      setWeapon(id) {
+        for (const [k, s] of Object.entries(slots)) s.visible = k === id;
+        if (id !== 'melee') {
+          swinging = false;
+          swingT = 0;
+          slots.melee.rotation.set(0, 0, 0);
+        }
+      },
+      startSwing() {
+        swinging = true;
+        swingT = 0;
+      },
+      update(delta) {
+        if (!swinging || !slots.melee) return;
+        swingT += delta;
+        const dur = 0.32;
+        const t = Math.min(1, swingT / dur);
+        const arc = t < 0.45
+          ? THREE.MathUtils.smoothstep(t / 0.45, 0, 1)
+          : 1 - THREE.MathUtils.smoothstep((t - 0.45) / 0.55, 0, 1);
+        slots.melee.rotation.x = -arc * 1.35;
+        slots.melee.rotation.y = arc * 0.55;
+        slots.melee.rotation.z = -arc * 0.9;
+        if (t >= 1) {
+          swinging = false;
+          swingT = 0;
+          slots.melee.rotation.set(0, 0, 0);
+        }
+      },
+      dispose() {
+        root.parent?.remove(root);
+      },
+    };
+  }
+
+  /**
+   * Full remote shot FX for every ballistic weapon (MG / sniper / shotgun).
+   * Same path for local observers and Space spectate — not flamethrower-only.
+   */
+  playRemoteFire(origin, dir, weaponId = 'machinegun', { scoped = false } = {}) {
+    if (!origin || !dir) return;
+    const from = origin.clone ? origin.clone() : new THREE.Vector3(origin.x, origin.y, origin.z);
+    const d = dir.clone ? dir.clone() : new THREE.Vector3(dir.x, dir.y, dir.z);
+    d.normalize();
+    const hitPoint = this.impacts.raycastBullet(from, d, FIRE_AIM_POINT_DIST);
+    const to = hitPoint
+      ? hitPoint.clone()
+      : from.clone().addScaledVector(d, Math.min(FIRE_AIM_POINT_DIST, 80));
+
+    // Always offset tracers for remote viewers (camera-coaxial = invisible).
+    let life = 0.12;
+    let radius = 0.03;
+    if (weaponId === 'sniper') {
+      life = 0.32;
+      radius = 0.05;
+    } else if (weaponId === 'shotgun') {
+      life = 0.14;
+      radius = 0.022;
+    } else if (weaponId === 'machinegun') {
+      life = 0.14;
+      radius = 0.032;
+    }
+    this._spawnScopedVisibleTracer(from, d, to, true, life, radius);
+    this._pulseRemoteMuzzle(from, weaponId);
+    this._spawnRemoteMuzzleSprite(from, weaponId);
+
+    this._ensureAudio();
+    try {
+      if (weaponId === 'sniper') this.audio.playSniperShot?.();
+      else if (weaponId === 'shotgun') this.audio.playShotgunShot?.();
+      else if (weaponId === 'machinegun') this.audio.playMachinegunShot?.();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  _pulseRemoteMuzzle(origin, weaponId = 'machinegun') {
+    if (!this.muzzleLight || !origin) return;
+    this.muzzleLight.position.copy(origin);
+    const sniper = weaponId === 'sniper';
+    const shotgun = weaponId === 'shotgun';
+    this.muzzleLight.color.setHex(sniper ? 0xffe0a0 : shotgun ? 0xffaa66 : 0xffcc66);
+    this.muzzleLight.intensity = sniper ? 8 : shotgun ? 6.5 : 5;
+    this.muzzleLight.distance = sniper ? 9 : 6;
+    this._remoteMuzzleT = sniper ? 0.14 : shotgun ? 0.1 : 0.08;
+  }
+
+  _spawnMuzzleSprite(origin, weaponId = 'machinegun') {
+    if (!origin) return;
+    const size = weaponId === 'sniper' ? 0.55 : weaponId === 'shotgun' ? 0.55 : 0.35;
+    const geo = new THREE.SphereGeometry(size * 0.35, 8, 8);
+    const mat = new THREE.MeshBasicMaterial({
+      color: weaponId === 'sniper' ? 0xfff0c0 : weaponId === 'shotgun' ? 0xffaa55 : 0xffcc66,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(origin);
+    mesh.renderOrder = 4;
+    this.scene.add(mesh);
+    const life = weaponId === 'sniper' ? 0.1 : weaponId === 'shotgun' ? 0.09 : 0.07;
+    this.tracers.push({ mesh, life, muzzleSprite: true });
+  }
+
+  _spawnRemoteMuzzleSprite(origin, weaponId = 'machinegun') {
+    this._spawnMuzzleSprite(origin, weaponId);
+  }
+
+  isReloading(weaponId = this.currentId) {
+    return !!this.reloading && (!weaponId || this.reloading === weaponId);
+  }
+
+  /** True only while the local flamethrower is actually emitting (not reload / empty). */
+  isFlamethrowerFiring() {
+    return this.currentId === 'flamethrower' && !!this._flameWasFiring && !this.reloading;
+  }
+
+  /**
+   * Any weapon that is genuinely shooting right now (not LMB-held during reload/empty).
+   * Spectate must match this — holding fire while reloading is NOT firing.
+   */
+  isActivelyFiring() {
+    if (this.paused || this.reloading) return false;
+    if (this.currentId === 'flamethrower') return this.isFlamethrowerFiring();
+    if (this.currentId === 'machinegun' || this.currentId === 'shotgun') {
+      return !!this.lmbHeld && this._pointerLocked() && this._canUseAmmo(this.currentId);
+    }
+    // Semi-auto: muzzle flash window = a real shot just happened
+    return this.muzzleFlashT > 0;
+  }
+
+  /**
+   * Keep remote flamethrower cone lit between flame packets / state ticks.
+   * Scorches only when `scorch` (network flame packets), not every render frame.
+   */
+  playRemoteFlame(username, origin, dir, { scorch = false } = {}) {
+    if (!username || !origin || !dir) return;
+    let entry = this.remoteFlames.get(username);
+    if (!entry) {
+      entry = {
+        cone: new FlameCone(this.scene, { remote: true }),
+        origin: new THREE.Vector3(),
+        dir: new THREE.Vector3(),
+        until: 0,
+      };
+      this.remoteFlames.set(username, entry);
+    }
+    entry.origin.set(origin[0] ?? origin.x, origin[1] ?? origin.y, origin[2] ?? origin.z);
+    entry.dir.set(dir[0] ?? dir.x, dir[1] ?? dir.y, dir[2] ?? dir.z).normalize();
+    entry.until = performance.now() + 280;
+    entry.cone.setFiring(true);
+    // Update immediately so the first spectate frame isn't an empty tip blob.
+    entry.cone.update(1 / 60, entry.origin, entry.dir);
+    if (scorch) {
+      this.impacts.applyFlame(entry.origin, entry.dir, FLAME_RANGE, FLAME_HALF_ANGLE);
+    }
+  }
+
+  stopRemoteFlame(username) {
+    const entry = this.remoteFlames.get(username);
+    if (!entry) return;
+    entry.until = 0;
+    entry.cone.setFiring(false);
+  }
+
+  _updateRemoteFlames(delta) {
+    const now = performance.now();
+    for (const [, entry] of this.remoteFlames) {
+      if (now > entry.until) {
+        entry.cone.setFiring(false);
+        continue;
+      }
+      entry.cone.setFiring(true);
+      entry.cone.update(delta, entry.origin, entry.dir);
+    }
   }
 
   setImpactMeshes(meshes) {
@@ -839,6 +1051,9 @@ export class WeaponSystem {
     const cfg = AMMO_CONFIG[weaponId];
     if (cfg?.infinite) return `${INFINITY}-${INFINITY}`;
     const state = this.ammo[weaponId];
+    if (this.reloading === weaponId) {
+      return `REL-${Math.floor(state.reserve)}`;
+    }
     return `${Math.floor(state.mag)}-${Math.floor(state.reserve)}`;
   }
 
@@ -975,7 +1190,11 @@ export class WeaponSystem {
     this.swinging = false;
     this.swingT = 0;
     this.slots.melee.rotation.set(0, 0, 0);
-    this.lmbHeld = this.lmbHeld && this.currentId === 'flamethrower';
+    this.lmbHeld = this.lmbHeld && (
+      this.currentId === 'flamethrower'
+      || this.currentId === 'machinegun'
+      || this.currentId === 'shotgun'
+    );
     if (this._flameWasFiring) {
       this.audio.setFlamethrowerFiring(false);
       this._flameWasFiring = false;
@@ -1147,7 +1366,7 @@ export class WeaponSystem {
     );
 
     if (this.net?.inMatch) {
-      this.net.tryHitscan(weaponId, this._muzzleWorld, this._forward);
+      this.net.tryHitscan(weaponId, this._muzzleWorld, this._forward, { scoped: useCameraRay });
     }
 
     // Post-shot kick for scoped MG (balance) — after the accurate FOV bullet.
@@ -1221,7 +1440,7 @@ export class WeaponSystem {
     }
 
     this.actionCooldown = SHOTGUN_FIRE_INTERVAL;
-    this.muzzleFlashT = 0.1;
+    this.muzzleFlashT = 0.12;
     if (!this._consumeRound('shotgun')) return;
 
     const aim = player ? player.getAimDirection(this._traceDir) : this._aimDirRef;
@@ -1236,6 +1455,11 @@ export class WeaponSystem {
       console.error(err);
     }
 
+    // Local muzzle flash (light + sprite). Was previously a no-op: update() only
+    // drove the muzzle light for MG/sniper, so shotgun flash never showed.
+    this._updateMuzzleLight(true, 0xffaa55, 7);
+    this._spawnMuzzleSprite(this._muzzleWorld, 'shotgun');
+
     const pellets = SHOTGUN_PELLETS_MIN
       + Math.floor(Math.random() * (SHOTGUN_PELLETS_MAX - SHOTGUN_PELLETS_MIN + 1));
     const origin = this._muzzleWorld.clone();
@@ -1248,7 +1472,7 @@ export class WeaponSystem {
       else this._aimEnd.copy(origin).addScaledVector(this._pelletDir, TRACER_LENGTH);
       this._spawnTracer(origin, this._aimEnd, 0.07, 0.012);
       if (this.net?.inMatch) {
-        this.net.tryHitscan('shotgun', origin, this._pelletDir);
+        this.net.tryHitscan('shotgun', origin, this._pelletDir, { scoped: false });
       }
     }
 
@@ -1525,6 +1749,15 @@ export class WeaponSystem {
 
     this.actionCooldown = Math.max(0, this.actionCooldown - delta);
     this.muzzleFlashT = Math.max(0, this.muzzleFlashT - delta);
+    if (this._remoteMuzzleT > 0) {
+      this._remoteMuzzleT = Math.max(0, this._remoteMuzzleT - delta);
+      if (this._remoteMuzzleT <= 0 && this.muzzleLight) {
+        this.muzzleLight.intensity = 0;
+      } else if (this.muzzleLight && this._remoteMuzzleT > 0) {
+        // Fade out remote flash
+        this.muzzleLight.intensity *= 0.82;
+      }
+    }
 
     this._aimDirRef = aimDir || null;
     this._cameraPos = cameraPos || null;
@@ -1534,21 +1767,31 @@ export class WeaponSystem {
     this.impacts.update(performance.now() * 0.001, delta);
     this._updateGrenades(delta);
     this._updateSmokes(delta, this._camera);
+    this._updateRemoteFlames(delta);
 
-    if (this.paused) return;
-
+    // Always decay tracers + muzzle sprites (paused spectate still receives remote FX).
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const tr = this.tracers[i];
       tr.life -= delta;
+      if (tr.muzzleSprite && tr.mesh?.material) {
+        tr.mesh.material.opacity = Math.max(0, tr.life * 12);
+        tr.mesh.scale.multiplyScalar(1 + delta * 8);
+      }
       if (tr.life <= 0) {
         this.scene.remove(tr.mesh);
         tr.mesh.geometry.dispose();
+        if (tr.mesh.material && tr.muzzleSprite) tr.mesh.material.dispose();
         this.tracers.splice(i, 1);
       }
     }
 
+    if (this.paused) return;
+
     if (this.currentId === 'machinegun' && this.lmbHeld && this._pointerLocked() && !this.reloading) {
       this._fireMachinegun(player, cameraPos);
+    }
+    if (this.currentId === 'shotgun' && this.lmbHeld && this._pointerLocked() && !this.reloading) {
+      this._fireShotgun(player, cameraPos);
     }
 
     if (this.currentId === 'flamethrower') {
@@ -1584,12 +1827,25 @@ export class WeaponSystem {
         this.audio.setFlamethrowerFiring(false);
         this._flameWasFiring = false;
       }
-      if (this.currentId === 'machinegun' || this.currentId === 'sniper') {
+      if (this.currentId === 'machinegun' || this.currentId === 'sniper' || this.currentId === 'shotgun') {
         this.flame.setFiring(false);
-        this._updateMuzzleLight(this.muzzleFlashT > 0, 0xffcc66, this.currentId === 'sniper' ? 5 : 3.5);
+        // Don't stomp a remote spectator flash still decaying on the shared light.
+        if (this._remoteMuzzleT > 0) {
+          /* remote pulse owns the light */
+        } else if (this.currentId === 'shotgun') {
+          this._updateMuzzleLight(this.muzzleFlashT > 0, 0xffaa55, 6.5);
+        } else {
+          this._updateMuzzleLight(
+            this.muzzleFlashT > 0,
+            0xffcc66,
+            this.currentId === 'sniper' ? 5 : 3.5,
+          );
+        }
       } else {
         this.flame.setFiring(false);
-        this._updateMuzzleLight(false, 0xffcc66, 0);
+        if (this._remoteMuzzleT <= 0) {
+          this._updateMuzzleLight(false, 0xffcc66, 0);
+        }
       }
     }
 
@@ -1623,6 +1879,8 @@ export class WeaponSystem {
     this.audio.stopAll();
     this.scene.remove(this.muzzleLight);
     this.flame.dispose();
+    for (const [, e] of this.remoteFlames) e.cone.dispose();
+    this.remoteFlames.clear();
   }
 }
 

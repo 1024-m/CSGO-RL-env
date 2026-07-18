@@ -103,6 +103,7 @@ class LobbyBoard:
         lobby = self.lobbies.get(lid)
         if lobby and lobby["seats"].get(seat) == username:
             lobby["seats"][seat] = None
+            lobby.get("_avatars", {}).pop(username, None)
             lobby["last_change"] = _now()
             if lobby["status"] == "live" and not any(lobby["seats"].values()):
                 self._reset_lobby(lobby)
@@ -121,7 +122,14 @@ class LobbyBoard:
         self._clear_user(username)
         return {"ok": True}
 
-    def claim(self, mode: str, lobby_id: str, username: str, seat: str) -> dict[str, Any]:
+    def claim(
+        self,
+        mode: str,
+        lobby_id: str,
+        username: str,
+        seat: str,
+        avatar_url: str | None = None,
+    ) -> dict[str, Any]:
         username = (username or "").strip()
         if not username:
             return {"ok": False, "error": "username required"}
@@ -140,6 +148,11 @@ class LobbyBoard:
         lobby["seats"][seat] = username
         lobby["last_change"] = _now()
         lobby.setdefault("_hb", {})[username] = _now()
+        avatars = lobby.setdefault("_avatars", {})
+        if avatar_url and str(avatar_url).strip():
+            avatars[username] = str(avatar_url).strip()
+        elif username not in avatars:
+            avatars[username] = f"https://huggingface.co/avatars/{username}"
         self.by_user[username] = (lobby_id, seat)
         started = self._maybe_start(lobby)
         return {
@@ -223,6 +236,7 @@ class LobbyBoard:
         lobby = self.lobbies.get(lobby_id)
         if not lobby:
             return []
+        avatars = lobby.get("_avatars") or {}
         out = []
         for seat, user in lobby["seats"].items():
             if user:
@@ -231,7 +245,15 @@ class LobbyBoard:
                     side = "X"
                 elif seat.startswith("Y-"):
                     side = "Y"
-                out.append({"username": user, "seat": seat, "side": side})
+                out.append(
+                    {
+                        "username": user,
+                        "seat": seat,
+                        "side": side,
+                        "avatarUrl": avatars.get(user)
+                        or f"https://huggingface.co/avatars/{user}",
+                    }
+                )
         return out
 
     def get(self, lobby_id: str) -> Optional[dict[str, Any]]:

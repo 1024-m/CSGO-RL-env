@@ -12,8 +12,8 @@ export const DAMAGE = {
   grenade: { max: 80, radius: 4.0 },
 };
 
-/** Smoke cover radius = HE blast radius + 10%. */
-export const SMOKE_RADIUS = DAMAGE.grenade.radius * 1.1;
+/** Smoke cover radius = (HE blast × 1.1) × 1.75, then doubled. */
+export const SMOKE_RADIUS = DAMAGE.grenade.radius * 1.1 * 1.75 * 2;
 
 export const MELEE_RANGE = 1.85;
 export const FLAME_RANGE = 5.2;

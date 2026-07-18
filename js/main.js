@@ -5,9 +5,10 @@ import { InteractableManager } from './interactables.js';
 import { setupMapCollision, dropSpawnFromCorner, CollisionWorld, PLAYER_HEIGHT } from './collision.js';
 import { WeatherSystem } from './weather.js';
 import { Minimap, collectMapMeshes } from './minimap.js?v=10';
-import { WeaponSystem } from './weapons.js?v=17';
-import { GameMenu } from './ui-menu.js?v=23';
-import { NetClient, SPAWN_OFFSETS } from './net.js?v=23';
+import { WeaponSystem } from './weapons.js?v=26';
+import { GameMenu } from './ui-menu.js?v=35';
+import { NetClient, SPAWN_OFFSETS } from './net.js?v=35';
+import { SpectatorController } from './spectator.js?v=35';
 
 const DAMAGE_VIGNETTE_SEC = 2;
 
@@ -28,11 +29,19 @@ const damageVignette = document.getElementById('damage-vignette');
 const playerHud = document.getElementById('player-hud');
 const playerAvatar = document.getElementById('player-avatar');
 const playerName = document.getElementById('player-name');
+const spectateBar = document.getElementById('spectate-bar');
+const specAvatar = document.getElementById('spec-avatar');
+const specName = document.getElementById('spec-name');
+const specPrev = document.getElementById('spec-prev');
+const specNext = document.getElementById('spec-next');
 const crosshair = document.getElementById('crosshair');
 const menuRoot = document.getElementById('menu-root');
 
 let lastHp = 100;
 let damageVignetteT = 0;
+let spectateScoped = false;
+let specLastHp = 100;
+let specLastName = null;
 
 function formatHp(hp) {
   const n = Math.max(0, Math.min(100, Math.ceil(hp)));
@@ -42,6 +51,7 @@ function formatHp(hp) {
 function setHpHud(hp, alive) {
   const el = hpValue || hpHud;
   if (!el) return;
+  if (hpHud) hpHud.hidden = false;
   if (hpValue) hpValue.textContent = alive ? formatHp(hp) : '000';
   else hpHud.textContent = alive ? formatHp(hp) : '000';
   if (hpHud) hpHud.classList.toggle('dead', !alive);
@@ -62,7 +72,7 @@ function updateDamageVignette(delta) {
 
 function setPlayerIdentityHud({ username, avatarUrl }) {
   if (!playerHud) return;
-  if (!username) {
+  if (!username || net?.spectating || spectator?.active) {
     playerHud.hidden = true;
     return;
   }
@@ -79,6 +89,71 @@ function setPlayerIdentityHud({ username, avatarUrl }) {
       playerAvatar.hidden = true;
     }
   }
+}
+
+function setSpectateIdentity(username, ghost) {
+  if (!spectateBar) return;
+  if (!username) {
+    spectateBar.hidden = true;
+    return;
+  }
+  spectateBar.hidden = false;
+  if (specName) specName.textContent = username;
+  const url = ghost?.avatarUrl
+    || `https://huggingface.co/avatars/${encodeURIComponent(username)}`;
+  if (specAvatar) {
+    specAvatar.hidden = false;
+    specAvatar.src = url;
+    specAvatar.onerror = () => {
+      specAvatar.hidden = true;
+    };
+  }
+}
+
+function updateSpectateHud(ghost, username) {
+  if (!ghost) {
+    setSpectateIdentity(null, null);
+    setHpHud(0, false);
+    if (weaponHud) weaponHud.hidden = true;
+    if (ammoHud) ammoHud.hidden = true;
+    if (minimapWrap) minimapWrap.hidden = true;
+    setCrosshairVisible(false);
+    spectateScoped = false;
+    specLastHp = 100;
+    specLastName = null;
+    return;
+  }
+  const hp = ghost.hp ?? 100;
+  const alive = ghost.alive !== false;
+  // Mirror player damage vignette when the followed player's HP drops.
+  if (username !== specLastName) {
+    specLastName = username;
+    specLastHp = hp;
+  } else if (alive && hp < specLastHp) {
+    pulseDamageVignette();
+    specLastHp = hp;
+  } else {
+    specLastHp = hp;
+  }
+  setSpectateIdentity(username, ghost);
+  setHpHud(hp, alive);
+  if (weaponHud) {
+    weaponHud.hidden = false;
+    weaponHud.dataset.weapon = ghost.weapon || 'machinegun';
+  }
+  if (ammoHud) {
+    ammoHud.hidden = false;
+    ammoHud.textContent = ghost.ammo || '—';
+  }
+  if (minimapWrap) minimapWrap.hidden = false;
+  const wantScope = !!ghost.scope && !!weapons?.canScope(ghost.weapon);
+  spectateScoped = wantScope;
+  if (crosshair) {
+    if (wantScope) crosshair.classList.add('scoped');
+    else crosshair.classList.remove('scoped');
+  }
+  setCrosshairVisible(wantScope);
+  if (weapons) weapons.setScoping(wantScope);
 }
 
 function setStatus(text) {
@@ -189,10 +264,38 @@ const net = new NetClient({
   },
 });
 
+const spectator = new SpectatorController({
+  ghosts: net.ghosts,
+  onStatus: setStatus,
+  onExit: () => {
+    exitSpectate();
+  },
+  onTargetChange: (name, ghost) => {
+    if (spectator?.active || net?.spectating) updateSpectateHud(ghost, name);
+  },
+});
+
+specPrev?.addEventListener('click', (e) => {
+  e.preventDefault();
+  if (spectator.active) spectator.cycle(-1);
+});
+specNext?.addEventListener('click', (e) => {
+  e.preventDefault();
+  if (spectator.active) spectator.cycle(1);
+});
+
 net.combat.onHpChange = (hp, alive) => {
+  if (net.spectating || spectator.active) return;
   if (alive && hp < lastHp) pulseDamageVignette();
   lastHp = hp;
   setHpHud(hp, alive);
+};
+
+net.onSpectateHit = (msg) => {
+  if (!spectator.active && !net.spectating) return;
+  const name = spectator.currentName();
+  if (!name || msg.target !== name) return;
+  pulseDamageVignette();
 };
 
 net.combat.onRespawn = () => {
@@ -202,10 +305,30 @@ net.combat.onRespawn = () => {
 
 net.onRemoteFire = (msg) => {
   if (!weapons || !msg.origin || !msg.dir) return;
+  const g = net.ghosts.ghosts.get(msg.from);
+  if (g?.reloading || g?.alive === false) return;
   const from = new THREE.Vector3(msg.origin[0], msg.origin[1], msg.origin[2]);
   const dir = new THREE.Vector3(msg.dir[0], msg.dir[1], msg.dir[2]).normalize();
-  const to = from.clone().addScaledVector(dir, 16);
-  weapons._spawnTracer(from, to, msg.weapon === 'sniper' ? 0.1 : 0.06);
+  const scoped = !!msg.scoped || !!g?.scope || msg.weapon === 'sniper';
+  weapons.playRemoteFire(from, dir, msg.weapon || 'machinegun', { scoped });
+};
+
+net.onRemoteFlame = (msg) => {
+  if (!weapons || !msg.origin || !msg.dir) return;
+  weapons.playRemoteFlame(msg.from, msg.origin, msg.dir, { scorch: true });
+};
+
+net.onRemoteMelee = (msg) => {
+  if (!msg?.from) return;
+  net.ghosts.queueSwing(msg.from);
+  if (weapons) {
+    weapons._ensureAudio?.();
+    try {
+      weapons.audio?.playMeleeSwing?.();
+    } catch (err) {
+      console.error(err);
+    }
+  }
 };
 
 net.onRemoteGrenadeThrow = (msg) => {
@@ -259,48 +382,58 @@ const menu = new GameMenu({
   },
 });
 
+let _identityReady = null;
 async function bootIdentity() {
-  const res = await net.initLocal();
-  menu.setIdentity({
-    username: net.username,
-    spaceUrl: net.spaceUrl,
-    authError: res.ok ? null : res.error,
-    playAllowed: net.playAllowed,
-  });
-  setPlayerIdentityHud({
-    username: net.username,
-    avatarUrl: net.avatarUrl,
-  });
-  setHpHud(net.combat.hp, net.combat.alive);
-  lastHp = net.combat.hp;
-  if (!res.ok) {
-    setStatus(res.error);
-    return;
-  }
-  setStatus(net.playAllowed ? `Online as ${net.username}` : `Spectating as ${net.username}`);
-  // Deep link: /?spectate=1&mode=sandbox&lobby=0A
-  try {
-    const q = new URLSearchParams(window.location.search);
-    if (q.get('spectate') === '1' && q.get('lobby')) {
-      const lobby = q.get('lobby');
-      const m = q.get('mode') || 'sandbox';
-      menu.showLobby(m);
-      net.startLobbyPoll(m);
-      net.connectSpectate(m, lobby);
-      setStatus(`Spectating ${lobby}…`);
-      history.replaceState({}, '', window.location.pathname);
-    } else if (net.playAllowed) {
-      const mode = q.get('mode');
-      if (mode && ['sandbox', '1v1', '4v4'].includes(mode)) {
-        menu.showLobby(mode);
-        net.startLobbyPoll(mode);
+  if (_identityReady) return _identityReady;
+  _identityReady = (async () => {
+    const res = await net.initLocal();
+    menu.setIdentity({
+      username: net.username,
+      spaceUrl: net.spaceUrl,
+      authError: res.ok ? null : res.error,
+      playAllowed: net.playAllowed,
+    });
+    setPlayerIdentityHud({
+      username: net.username,
+      avatarUrl: net.avatarUrl,
+    });
+    setHpHud(net.combat.hp, net.combat.alive);
+    lastHp = net.combat.hp;
+    if (!res.ok) {
+      setStatus(res.error);
+      return res;
+    }
+    setStatus(net.playAllowed ? `Online as ${net.username}` : `Spectator · ${net.username}`);
+    // Deep link: /?spectate=1&mode=sandbox&lobby=0A
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('spectate') === '1' && q.get('lobby')) {
+        const lobby = q.get('lobby');
+        const m = q.get('mode') || 'sandbox';
+        net.spectating = true;
+        // Wait for map, then lock into spectate UI immediately (no play controls).
+        const startSpec = () => {
+          if (!mapLoaded || !player) {
+            requestAnimationFrame(startSpec);
+            return;
+          }
+          enterSpectateMode();
+          net.connectSpectate(m, lobby);
+          setStatus(`Spectating ${lobby}…`);
+        };
+        startSpec();
         history.replaceState({}, '', window.location.pathname);
       }
+    } catch (err) {
+      console.warn(err);
     }
-  } catch (err) {
-    console.warn(err);
-  }
+    return res;
+  })();
+  return _identityReady;
 }
+
+// Resolve identity immediately — do not wait for map (avoids "Checking HF login…" stall).
+void bootIdentity();
 
 function fitCharacterModel(model) {
   const box = new THREE.Box3().setFromObject(model);
@@ -324,6 +457,10 @@ function initWeapons() {
   weapons.setImpactMeshes(mapHitMeshes);
   weapons.net = net;
   weapons.paused = true;
+  weapons.onArmsReady = () => {
+    net.ghosts.setArmsFactory(() => weapons.createGhostArms());
+  };
+  if (weapons.ready) weapons.onArmsReady();
   weapons.onWeaponChange = (weaponId) => {
     if (weaponHud) weaponHud.dataset.weapon = weaponId;
     if (!weapons.canScope()) setScoping(false);
@@ -343,28 +480,108 @@ function applySpawn(spawnIndex) {
 
 function enterGameplay(info) {
   if (!player || !mapLoaded) return;
+  const spectating = !!info.spectating || !net.playAllowed || net.host === 'space';
+  net.spectating = spectating;
+
+  // Space / spectate: follow-cam only — never enable the local player controller.
+  if (spectating) {
+    enterSpectateMode();
+    return;
+  }
+
+  spectator.stop();
   gameplayActive = true;
   menu.hide();
   if (hud) hud.hidden = false;
   applySpawn(info.spawnIndex ?? 0);
   player.enable();
-  const spectating = !!info.spectating;
   if (weapons) {
-    weapons.paused = spectating;
-    weapons.net = spectating ? null : net;
+    weapons.paused = false;
+    weapons.net = net;
     weapons.lmbHeld = false;
   }
   net.combat.reset();
-  setCrosshairVisible(!spectating);
+  setCrosshairVisible(true);
+  if (weaponHud) weaponHud.hidden = false;
+  if (ammoHud) ammoHud.hidden = false;
+  if (hpHud) hpHud.hidden = false;
+  if (playerHud) playerHud.hidden = false;
   if (minimapWrap) {
     minimap._pinBottomLeft();
     minimapWrap.hidden = false;
   }
-  setStatus(spectating ? 'Spectating — WASD move, mouse look. No weapons.' : CONTROLS_LINE);
+  if (character) character.visible = true;
+  setStatus(CONTROLS_LINE);
   document.exitPointerLock?.();
 }
 
+function enterSpectateMode() {
+  gameplayActive = false; // blocks WASD / guns / pointer-lock play loop
+  net.spectating = true;
+  menu.hide();
+  if (player) {
+    player.disable();
+    document.exitPointerLock?.();
+  }
+  if (weapons) {
+    weapons.paused = true;
+    weapons.net = null;
+    weapons.lmbHeld = false;
+    void weapons.initAudio();
+    // Ensure ghost guns exist even if MG/sniper finished loading after match start.
+    net.ghosts.setArmsFactory(() => weapons.createGhostArms());
+  }
+  setScoping(false);
+  spectateScoped = false;
+  if (playerHud) playerHud.hidden = true;
+  if (hud) hud.hidden = false;
+  if (hpHud) hpHud.hidden = false;
+  if (weaponHud) weaponHud.hidden = false;
+  if (ammoHud) ammoHud.hidden = false;
+  if (minimapWrap) minimapWrap.hidden = false;
+  if (character) character.visible = false;
+  prompt.hidden = true;
+  panel.hidden = true;
+  spectator.start();
+  updateSpectateHud(spectator.currentGhost(), spectator.currentName());
+}
+
+function exitSpectate() {
+  spectator.stop();
+  gameplayActive = false;
+  net.spectating = false;
+  spectateScoped = false;
+  if (player) {
+    player.disable();
+    document.exitPointerLock?.();
+  }
+  if (weapons) {
+    weapons.paused = true;
+    weapons.net = null;
+    weapons.lmbHeld = false;
+    weapons.setScoping(false);
+  }
+  setScoping(false);
+  setCrosshairVisible(false);
+  if (spectateBar) spectateBar.hidden = true;
+  if (hud) hud.hidden = true;
+  if (minimapWrap) minimapWrap.hidden = true;
+  if (character) character.visible = true;
+  net.disconnectMatch();
+  // On HF Space, leave spectate back to the public board.
+  if (net.host === 'space') {
+    window.location.href = '/board';
+    return;
+  }
+  menu.show();
+  setStatus('Spectate ended');
+}
+
 function exitGameplayToMenu() {
+  if (spectator.active || net.spectating) {
+    exitSpectate();
+    return;
+  }
   gameplayActive = false;
   if (player) {
     player.disable();
@@ -389,6 +606,8 @@ characterLoader.load(
     const model = gltf.scene;
     fitCharacterModel(model);
     character.add(model);
+    // Ghosts / spectate targets clone this fitted mesh (no blue capsules).
+    net.ghosts.setPrototype(model);
     characterReady = true;
     initWeapons();
   },
@@ -455,10 +674,19 @@ mapLoader.load(
       mapLoaded = true;
       bootComplete = true;
       initWeapons();
+      if (net.spectating || !net.playAllowed) {
+        if (weapons) {
+          weapons.paused = true;
+          weapons.net = null;
+        }
+      }
       setCrosshairVisible(false);
       menu.show();
-      void bootIdentity();
-      setStatus('Choose a mode to play');
+      void bootIdentity().then((res) => {
+        if (res?.ok && net.playAllowed && !net.spectating) {
+          setStatus('Choose a mode to play');
+        }
+      });
     } catch (err) {
       console.error(err);
       setStatus(`Failed to start — ${err.message}`);
@@ -478,7 +706,7 @@ mapLoader.load(
   },
 );
 
-function updateThirdPersonCamera(feet, cameraYaw, pitch, delta) {
+function updateThirdPersonCamera(feet, cameraYaw, pitch, delta, opts = {}) {
   const cosPitch = Math.cos(pitch);
   cameraAimDir.set(
     Math.sin(cameraYaw) * cosPitch,
@@ -489,9 +717,18 @@ function updateThirdPersonCamera(feet, cameraYaw, pitch, delta) {
   cameraPivot.set(feet.x, feet.y + CAMERA_HEAD_Y, feet.z);
   cameraHorizBack.set(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
 
-  const targetDist = scoping ? SCOPE_DISTANCE : CAMERA_DISTANCE;
-  const targetFov = scoping ? (weapons?.getScopeFov?.(CAMERA_FOV) ?? CAMERA_FOV) : CAMERA_FOV;
-  cameraFov += (targetFov - cameraFov) * Math.min(1, delta * 12);
+  const scoped = opts.scoped ?? scoping;
+  const weaponId = opts.weaponId;
+  const targetDist = scoped ? SCOPE_DISTANCE : CAMERA_DISTANCE;
+  const targetFov = scoped
+    ? (weapons?.getScopeFov?.(CAMERA_FOV, weaponId) ?? CAMERA_FOV)
+    : CAMERA_FOV;
+  // Spectate: snap FOV to the player's exact scope/hip FOV (no laggy lerp).
+  if (spectator?.active || net?.spectating) {
+    cameraFov = targetFov;
+  } else {
+    cameraFov += (targetFov - cameraFov) * Math.min(1, delta * 18);
+  }
   camera.fov = cameraFov;
   camera.updateProjectionMatrix();
 
@@ -506,7 +743,7 @@ function updateThirdPersonCamera(feet, cameraYaw, pitch, delta) {
     .addScaledVector(cameraAimDir, AIM_LOOK_DISTANCE);
   camera.lookAt(cameraLookTarget);
 
-  if (characterReady) {
+  if (characterReady && !spectator?.active && !net?.spectating) {
     character.visible = !scoping;
   }
 }
@@ -529,7 +766,7 @@ function hidePanel() {
 }
 
 renderer.domElement.addEventListener('click', () => {
-  if (!gameplayActive) return;
+  if (!gameplayActive || net.spectating || spectator.active) return;
   if (player && mapLoaded && panel.hidden) {
     weather.startRainAudio();
     if (weapons) weapons.initAudio();
@@ -542,7 +779,7 @@ renderer.domElement.addEventListener('contextmenu', (event) => {
 });
 
 function setScoping(active) {
-  const allowed = !!weapons?.canScope() && gameplayActive;
+  const allowed = !!weapons?.canScope() && gameplayActive && !net.spectating && !spectator.active;
   scoping = !!active && allowed;
   if (crosshair) {
     if (scoping) crosshair.classList.add('scoped');
@@ -553,6 +790,7 @@ function setScoping(active) {
 }
 
 window.addEventListener('mousedown', (event) => {
+  if (net.spectating || spectator.active) return;
   if (event.button === 2 && gameplayActive && player?.pointerLocked && panel.hidden) {
     setScoping(true);
   }
@@ -577,6 +815,7 @@ window.addEventListener('blur', () => {
 panelClose.addEventListener('click', hidePanel);
 
 window.addEventListener('keydown', (event) => {
+  if (net.spectating || spectator.active) return;
   if (!gameplayActive) return;
   if (event.code === 'KeyE' && interactables && panel.hidden) {
     const nearest = interactables.getNearest();
@@ -601,12 +840,76 @@ function animate() {
   weather.update(delta, camera.position);
   updateDamageVignette(delta);
 
-  if (player && mapLoaded && gameplayActive) {
+  // Spectate: mirror selected player's camera / scope / FX (← → switch).
+  if (spectator.active || net.spectating) {
+    if (character) character.visible = false;
+    if (weapons) {
+      weapons.paused = true;
+      weapons.net = null;
+      weapons.update(delta, null, null, null, camera);
+    }
+    net.ghosts.update(delta);
+    const name = spectator.currentName();
+    const g = spectator.currentGhost();
+    if (g) {
+      updateSpectateHud(g, name);
+      // Unlock audio on Space (spectate never pointer-locks).
+      if (weapons && !weapons.audio?.ready) void weapons.initAudio();
+      // Continuous FX only while actually firing — never during reload (any weapon).
+      if (weapons) {
+        const lit = !g.reloading && (g.flame || (g.firing && g.weapon === 'flamethrower'));
+        if (lit) {
+          // Aim = camera look (not body yaw). Muzzle = same shoulder offset as local.
+          const yaw = g.targetCamYaw ?? g.camYaw ?? g.yaw;
+          const pitch = g.targetPitch ?? g.pitch ?? 0;
+          const cosP = Math.cos(pitch);
+          const fdir = new THREE.Vector3(
+            Math.sin(yaw) * cosP,
+            Math.sin(pitch),
+            Math.cos(yaw) * cosP,
+          ).normalize();
+          const feet = g.target;
+          const shoulderForward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+          const viewRight = new THREE.Vector3().crossVectors(
+            new THREE.Vector3(0, 1, 0),
+            fdir,
+          );
+          if (viewRight.lengthSq() < 1e-8) viewRight.set(1, 0, 0);
+          else viewRight.normalize();
+          const viewLeft = viewRight.clone().multiplyScalar(-1);
+          const origin = [
+            feet.x + shoulderForward.x * 0.28 + viewLeft.x * 0.28,
+            feet.y + 1.18,
+            feet.z + shoulderForward.z * 0.28 + viewLeft.z * 0.28,
+          ];
+          weapons.playRemoteFlame(name, origin, [fdir.x, fdir.y, fdir.z]);
+        } else {
+          weapons.stopRemoteFlame(name);
+        }
+      }
+      // Camera = player's look; body on ghost uses characterYaw (synced separately).
+      const camYaw = g.targetCamYaw ?? g.camYaw ?? g.targetYaw ?? g.yaw;
+      const bodyYaw = g.targetYaw ?? g.yaw;
+      updateThirdPersonCamera(
+        g.target,
+        camYaw,
+        g.targetPitch ?? g.pitch ?? 0,
+        delta,
+        { scoped: spectateScoped, weaponId: g.weapon },
+      );
+      minimap.draw(g.target.x, g.target.z, camYaw, bodyYaw, true);
+    } else if (player && mapLoaded) {
+      updateSpectateHud(null, null);
+      const feet = player.getFeetPosition(new THREE.Vector3());
+      updateThirdPersonCamera(feet, player.cameraYaw, player.cameraPitch, delta);
+    }
+  } else if (player && mapLoaded && gameplayActive) {
     player.update(delta);
 
     const feet = player.getFeetPosition(new THREE.Vector3());
     character.position.copy(feet);
     character.rotation.y = player.characterYaw;
+    if (character) character.visible = true;
 
     updateThirdPersonCamera(feet, player.cameraYaw, player.cameraPitch, delta);
     camera.getWorldDirection(worldAimDir);
@@ -616,7 +919,13 @@ function animate() {
       weapons.update(delta, player, worldAimDir, camera.position, camera);
     }
 
-    net.update(delta, player, weapons?.currentId || 'machinegun');
+    net.update(delta, player, weapons?.currentId || 'machinegun', {
+      scope: scoping,
+      ammo: weapons?.getAmmoDisplay?.() || '',
+      reloading: !!weapons?.isReloading?.(),
+      // All weapons: real shooting only (LMB during reload/empty = false).
+      firing: !!weapons?.isActivelyFiring?.(),
+    });
 
     const mouseLookActive = player.pointerLocked && !player.isMouseIdle();
     minimap.draw(feet.x, feet.z, player.cameraYaw, player.characterYaw, mouseLookActive);
@@ -627,6 +936,7 @@ function animate() {
     // Menu: keep a static third-person look at spawn
     const feet = player.getFeetPosition(new THREE.Vector3());
     character.position.copy(feet);
+    if (character) character.visible = true;
     updateThirdPersonCamera(feet, player.cameraYaw, player.cameraPitch, delta);
   }
 
